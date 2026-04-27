@@ -38,8 +38,53 @@ pub fn rgba_from_pixmap(pix: &Pixmap) -> RgbaImage {
     out
 }
 
-pub fn render_annotations(_target: &mut Pixmap, _source: &Pixmap, _scene: &AnnotationScene) {
-    // Implemented in Tasks 6–9.
+pub fn render_annotations(target: &mut Pixmap, source: &Pixmap, scene: &AnnotationScene) {
+    for ann in scene.iter_committed().chain(scene.in_progress()) {
+        render_one(target, source, ann);
+    }
+}
+
+fn render_one(target: &mut Pixmap, _source: &Pixmap, ann: &crate::annotation::model::Annotation) {
+    use tiny_skia::{PathBuilder, Stroke as TsStroke, Transform};
+    use crate::annotation::model::Annotation;
+
+    match ann {
+        Annotation::Pen { points, stroke } => {
+            if points.len() < 2 { return; }
+            let mut pb = PathBuilder::new();
+            pb.move_to(points[0].x, points[0].y);
+            for p in &points[1..] { pb.line_to(p.x, p.y); }
+            let Some(path) = pb.finish() else { return };
+            let paint = make_paint(stroke.color);
+            let mut s = TsStroke::default();
+            s.width = stroke.width.max(0.5);
+            s.line_cap = tiny_skia::LineCap::Round;
+            s.line_join = tiny_skia::LineJoin::Round;
+            target.stroke_path(&path, &paint, &s, Transform::identity(), None);
+        }
+        Annotation::Rectangle { rect, stroke } => {
+            if rect.is_degenerate() { return; }
+            let r = match tiny_skia::Rect::from_xywh(rect.origin.x, rect.origin.y, rect.size.w, rect.size.h) {
+                Some(r) => r,
+                None => return,
+            };
+            let path = PathBuilder::from_rect(r);
+            let paint = make_paint(stroke.color);
+            let mut s = TsStroke::default();
+            s.width = stroke.width.max(0.5);
+            target.stroke_path(&path, &paint, &s, Transform::identity(), None);
+        }
+        // Other variants implemented in Tasks 7–9.
+        _ => {}
+    }
+}
+
+fn make_paint(color: cosmic::iced::Color) -> tiny_skia::Paint<'static> {
+    let mut p = tiny_skia::Paint::default();
+    let [r, g, b, a] = color.into_rgba8();
+    p.set_color_rgba8(r, g, b, a);
+    p.anti_alias = true;
+    p
 }
 
 /// Apply scene.crop() to an RgbaImage. No-op if crop is None or degenerate.
@@ -71,6 +116,76 @@ pub fn composite_annotations(captured: RgbaImage, scene: &AnnotationScene) -> Rg
 mod tests {
     use super::*;
     use image::Rgba;
+    use std::path::PathBuf;
+    use crate::annotation::model::{Annotation, AnnotationScene, Color, LocalRect, Point, Size, Stroke};
+
+    fn snapshot_path(name: &str) -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("src/annotation/tests/snapshots");
+        p.push(format!("{name}.png"));
+        p
+    }
+
+    fn assert_snapshot(name: &str, pix: &Pixmap) {
+        let path = snapshot_path(name);
+        if std::env::var("UPDATE_SNAPSHOTS").is_ok() || !path.exists() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            pix.save_png(&path).unwrap();
+            return;
+        }
+        let actual = pix.encode_png().unwrap();
+        let expected = std::fs::read(&path).unwrap();
+        assert_eq!(actual, expected, "snapshot mismatch for {name} — re-run with UPDATE_SNAPSHOTS=1 to update");
+    }
+
+    fn solid_canvas(w: u32, h: u32, rgba: [u8; 4]) -> Pixmap {
+        let mut pix = Pixmap::new(w, h).unwrap();
+        for chunk in pix.data_mut().chunks_exact_mut(4) {
+            // Premultiply.
+            let af = rgba[3] as u32;
+            chunk[0] = ((rgba[0] as u32 * af + 127) / 255) as u8;
+            chunk[1] = ((rgba[1] as u32 * af + 127) / 255) as u8;
+            chunk[2] = ((rgba[2] as u32 * af + 127) / 255) as u8;
+            chunk[3] = rgba[3];
+        }
+        pix
+    }
+
+    fn red_stroke(w: f32) -> Stroke {
+        Stroke { width: w, color: Color::from_rgb(1.0, 0.0, 0.0) }
+    }
+
+    #[test]
+    fn snapshot_pen_diagonal() {
+        let mut canvas = solid_canvas(64, 64, [255, 255, 255, 255]);
+        let src = canvas.clone();
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Pen {
+            points: vec![
+                Point { x: 8.0, y: 8.0 },
+                Point { x: 32.0, y: 32.0 },
+                Point { x: 56.0, y: 8.0 },
+            ],
+            stroke: red_stroke(3.0),
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        assert_snapshot("pen_diagonal", &canvas);
+    }
+
+    #[test]
+    fn snapshot_rect_outline() {
+        let mut canvas = solid_canvas(64, 64, [255, 255, 255, 255]);
+        let src = canvas.clone();
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Rectangle {
+            rect: LocalRect { origin: Point { x: 12.0, y: 12.0 }, size: Size { w: 40.0, h: 40.0 } },
+            stroke: red_stroke(2.0),
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        assert_snapshot("rect_outline", &canvas);
+    }
 
     #[test]
     fn round_trip_opaque_solid() {
