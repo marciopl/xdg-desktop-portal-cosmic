@@ -14,6 +14,12 @@ use crate::annotation::model::{
 use crate::annotation::render::{pixmap_from_rgba, render_annotations, rgba_from_pixmap};
 use crate::fl;
 
+pub struct TextEditState {
+    pub position: Point,
+    pub text: String,
+    pub input_id: cosmic::widget::Id,
+}
+
 pub struct AnnotationView {
     pub captured: RgbaImage,
     pub captured_handle: cosmic::widget::image::Handle,
@@ -27,6 +33,8 @@ pub struct AnnotationView {
     /// Logical-pixel size of the rendered canvas widget. When (0,0), coordinates are mapped
     /// 1:1 from widget pixels to canvas pixels.
     canvas_widget_size: (f32, f32),
+    /// Pending text edit: position (canvas-local), current text buffer, focus id.
+    pub text_edit: Option<TextEditState>,
 }
 
 impl AnnotationView {
@@ -46,6 +54,7 @@ impl AnnotationView {
             pointer_down: None,
             last_cursor: None,
             canvas_widget_size: (0.0, 0.0),
+            text_edit: None,
         }
     }
 
@@ -100,6 +109,9 @@ pub enum Msg {
     PointerMove(IcedPoint),
     PointerUp,
     CanvasResized { width: f32, height: f32 },
+    TextEditChanged(String),
+    TextEditSubmit,
+    TextEditCancel,
 }
 
 pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
@@ -117,17 +129,44 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
         None => space::horizontal().width(Length::Fill).into(),
     };
 
-    let canvas = Stack::with_children(vec![bg, overlay])
+    let canvas_stack = Stack::with_children(vec![bg, overlay])
         .width(Length::Fill)
         .height(Length::Fill);
-    let canvas = mouse_area(canvas)
+    let canvas_area = mouse_area(canvas_stack)
         .on_press(Msg::PointerDown)
         .on_move(Msg::PointerMove)
         .on_release(Msg::PointerUp);
 
+    // If a text edit is in progress, layer a positioned text_input over the canvas.
+    let canvas_element: Element<'_, Msg> = if let Some(te) = &state.text_edit {
+        let leading_x = te.position.x.max(0.0);
+        let leading_y = te.position.y.max(0.0);
+        let input: Element<'_, Msg> = cosmic::widget::text_input("", &te.text)
+            .id(te.input_id.clone())
+            .on_input(Msg::TextEditChanged)
+            .on_submit(|_| Msg::TextEditSubmit)
+            .width(Length::Fixed(200.0))
+            .into();
+        let positioned: Element<'_, Msg> = column::with_children(vec![
+            space::vertical().height(Length::Fixed(leading_y)).into(),
+            row::with_children(vec![
+                space::horizontal().width(Length::Fixed(leading_x)).into(),
+                input,
+            ])
+            .into(),
+        ])
+        .into();
+        Stack::with_children(vec![canvas_area.into(), positioned])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else {
+        canvas_area.into()
+    };
+
     column::with_children(vec![
         toolbar,
-        container(canvas)
+        container(canvas_element)
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
@@ -257,8 +296,16 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                         tile_size: state.tools.tile_size,
                     });
                 }
-                // Text and Crop tools are wired in Tasks 15 and 16.
-                Tool::Text | Tool::Crop => {}
+                Tool::Text => {
+                    state.text_edit = Some(TextEditState {
+                        position: cp,
+                        text: String::new(),
+                        input_id: cosmic::widget::Id::unique(),
+                    });
+                    state.pointer_down = None; // Text doesn't drag.
+                }
+                // Crop tool is wired in Task 16.
+                Tool::Crop => {}
             }
             UpdateOutcome::None
         }
@@ -343,6 +390,31 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                 state.scene.commit_in_progress();
             }
             state.invalidate_overlay();
+            UpdateOutcome::None
+        }
+        Msg::TextEditChanged(t) => {
+            if let Some(te) = state.text_edit.as_mut() {
+                te.text = t;
+            }
+            UpdateOutcome::None
+        }
+        Msg::TextEditSubmit => {
+            if let Some(te) = state.text_edit.take() {
+                if !te.text.is_empty() {
+                    state.scene.begin(Annotation::Text {
+                        position: te.position,
+                        content: te.text,
+                        font_size: state.tools.text_size,
+                        color: state.tools.color,
+                    });
+                    state.scene.commit_in_progress();
+                    state.invalidate_overlay();
+                }
+            }
+            UpdateOutcome::None
+        }
+        Msg::TextEditCancel => {
+            state.text_edit = None;
             UpdateOutcome::None
         }
     }
