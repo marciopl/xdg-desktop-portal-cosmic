@@ -74,7 +74,65 @@ fn render_one(target: &mut Pixmap, _source: &Pixmap, ann: &crate::annotation::mo
             s.width = stroke.width.max(0.5);
             target.stroke_path(&path, &paint, &s, Transform::identity(), None);
         }
-        // Other variants implemented in Tasks 7–9.
+        Annotation::Line { from, to, stroke } => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(from.x, from.y);
+            pb.line_to(to.x, to.y);
+            let Some(path) = pb.finish() else { return };
+            let paint = make_paint(stroke.color);
+            let mut s = TsStroke::default();
+            s.width = stroke.width.max(0.5);
+            s.line_cap = tiny_skia::LineCap::Round;
+            target.stroke_path(&path, &paint, &s, Transform::identity(), None);
+        }
+        Annotation::Arrow { from, to, stroke } => {
+            // Shaft
+            let mut pb = PathBuilder::new();
+            pb.move_to(from.x, from.y);
+            pb.line_to(to.x, to.y);
+            let Some(path) = pb.finish() else { return };
+            let paint = make_paint(stroke.color);
+            let mut s = TsStroke::default();
+            s.width = stroke.width.max(0.5);
+            s.line_cap = tiny_skia::LineCap::Round;
+            target.stroke_path(&path, &paint, &s, Transform::identity(), None);
+
+            // Arrowhead — filled triangle at `to`, sized proportional to stroke width.
+            let dx = to.x - from.x;
+            let dy = to.y - from.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 0.5 { return; }
+            let head_len = (stroke.width * 4.0).max(8.0);
+            let head_w = (stroke.width * 3.0).max(6.0);
+            let ux = dx / len; let uy = dy / len;
+            let bx = to.x - ux * head_len;
+            let by = to.y - uy * head_len;
+            let nx = -uy; let ny = ux;
+            let p1 = (to.x, to.y);
+            let p2 = (bx + nx * head_w * 0.5, by + ny * head_w * 0.5);
+            let p3 = (bx - nx * head_w * 0.5, by - ny * head_w * 0.5);
+            let mut hb = PathBuilder::new();
+            hb.move_to(p1.0, p1.1);
+            hb.line_to(p2.0, p2.1);
+            hb.line_to(p3.0, p3.1);
+            hb.close();
+            if let Some(head) = hb.finish() {
+                target.fill_path(&head, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+            }
+        }
+        Annotation::Ellipse { rect, stroke } => {
+            if rect.is_degenerate() { return; }
+            let r = match tiny_skia::Rect::from_xywh(rect.origin.x, rect.origin.y, rect.size.w, rect.size.h) {
+                Some(r) => r,
+                None => return,
+            };
+            let Some(path) = PathBuilder::from_oval(r) else { return };
+            let paint = make_paint(stroke.color);
+            let mut s = TsStroke::default();
+            s.width = stroke.width.max(0.5);
+            target.stroke_path(&path, &paint, &s, Transform::identity(), None);
+        }
+        // Text + Pixelate implemented in Tasks 8–9.
         _ => {}
     }
 }
@@ -185,6 +243,50 @@ mod tests {
         scene.commit_in_progress();
         render_annotations(&mut canvas, &src, &scene);
         assert_snapshot("rect_outline", &canvas);
+    }
+
+    #[test]
+    fn snapshot_line_horizontal() {
+        let mut canvas = solid_canvas(64, 64, [255, 255, 255, 255]);
+        let src = canvas.clone();
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Line {
+            from: Point { x: 8.0, y: 32.0 },
+            to: Point { x: 56.0, y: 32.0 },
+            stroke: red_stroke(2.0),
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        assert_snapshot("line_horizontal", &canvas);
+    }
+
+    #[test]
+    fn snapshot_arrow_diagonal() {
+        let mut canvas = solid_canvas(64, 64, [255, 255, 255, 255]);
+        let src = canvas.clone();
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Arrow {
+            from: Point { x: 8.0, y: 8.0 },
+            to: Point { x: 56.0, y: 56.0 },
+            stroke: red_stroke(3.0),
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        assert_snapshot("arrow_diagonal", &canvas);
+    }
+
+    #[test]
+    fn snapshot_ellipse_outline() {
+        let mut canvas = solid_canvas(64, 64, [255, 255, 255, 255]);
+        let src = canvas.clone();
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Ellipse {
+            rect: LocalRect { origin: Point { x: 8.0, y: 16.0 }, size: Size { w: 48.0, h: 32.0 } },
+            stroke: red_stroke(2.0),
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        assert_snapshot("ellipse_outline", &canvas);
     }
 
     #[test]
