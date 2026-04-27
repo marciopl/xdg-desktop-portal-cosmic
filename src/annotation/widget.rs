@@ -8,7 +8,9 @@ use cosmic::widget::{button, column, container, mouse_area, row, space};
 use image::RgbaImage;
 use tiny_skia::Pixmap;
 
-use crate::annotation::model::{Annotation, AnnotationScene, Point, Stroke, Tool, ToolState};
+use crate::annotation::model::{
+    Annotation, AnnotationScene, LocalRect, Point, Size, Stroke, Tool, ToolState,
+};
 use crate::annotation::render::{pixmap_from_rgba, render_annotations, rgba_from_pixmap};
 use crate::fl;
 
@@ -144,6 +146,13 @@ fn build_toolbar(state: &AnnotationView) -> Element<'_, Msg> {
 
     row::with_children(vec![
         tool_btn(fl!("tool-pen"), Tool::Pen).into(),
+        tool_btn(fl!("tool-line"), Tool::Line).into(),
+        tool_btn(fl!("tool-arrow"), Tool::Arrow).into(),
+        tool_btn(fl!("tool-rectangle"), Tool::Rectangle).into(),
+        tool_btn(fl!("tool-ellipse"), Tool::Ellipse).into(),
+        tool_btn(fl!("tool-text"), Tool::Text).into(),
+        tool_btn(fl!("tool-pixelate"), Tool::Pixelate).into(),
+        tool_btn(fl!("tool-crop"), Tool::Crop).into(),
         space::horizontal().width(Length::Fill).into(),
         button::standard(fl!("annotate-undo"))
             .on_press(Msg::Undo)
@@ -201,25 +210,63 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
             };
             let cp = state.map_pointer(p);
             state.pointer_down = Some(cp);
+            let stroke = Stroke {
+                width: state.tools.stroke_width,
+                color: state.tools.color,
+            };
+            let zero_rect = LocalRect {
+                origin: cp,
+                size: Size { w: 0.0, h: 0.0 },
+            };
             match state.tools.active_tool {
                 Tool::Pen => {
                     state.scene.begin(Annotation::Pen {
                         points: vec![cp],
-                        stroke: Stroke {
-                            width: state.tools.stroke_width,
-                            color: state.tools.color,
-                        },
+                        stroke,
                     });
                 }
-                _ => {}
+                Tool::Line => {
+                    state.scene.begin(Annotation::Line {
+                        from: cp,
+                        to: cp,
+                        stroke,
+                    });
+                }
+                Tool::Arrow => {
+                    state.scene.begin(Annotation::Arrow {
+                        from: cp,
+                        to: cp,
+                        stroke,
+                    });
+                }
+                Tool::Rectangle => {
+                    state.scene.begin(Annotation::Rectangle {
+                        rect: zero_rect,
+                        stroke,
+                    });
+                }
+                Tool::Ellipse => {
+                    state.scene.begin(Annotation::Ellipse {
+                        rect: zero_rect,
+                        stroke,
+                    });
+                }
+                Tool::Pixelate => {
+                    state.scene.begin(Annotation::Pixelate {
+                        rect: zero_rect,
+                        tile_size: state.tools.tile_size,
+                    });
+                }
+                // Text and Crop tools are wired in Tasks 15 and 16.
+                Tool::Text | Tool::Crop => {}
             }
             UpdateOutcome::None
         }
         Msg::PointerMove(p) => {
             state.last_cursor = Some(p);
-            if state.pointer_down.is_none() {
+            let Some(start) = state.pointer_down else {
                 return UpdateOutcome::None;
-            }
+            };
             let cp = state.map_pointer(p);
             match state.tools.active_tool {
                 Tool::Pen => {
@@ -230,15 +277,71 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                     });
                     state.invalidate_overlay();
                 }
-                _ => {}
+                Tool::Line => {
+                    state.scene.update_in_progress(|a| {
+                        if let Annotation::Line { to, .. } = a {
+                            *to = cp;
+                        }
+                    });
+                    state.invalidate_overlay();
+                }
+                Tool::Arrow => {
+                    state.scene.update_in_progress(|a| {
+                        if let Annotation::Arrow { to, .. } = a {
+                            *to = cp;
+                        }
+                    });
+                    state.invalidate_overlay();
+                }
+                Tool::Rectangle => {
+                    state.scene.update_in_progress(|a| {
+                        if let Annotation::Rectangle { rect, .. } = a {
+                            *rect = LocalRect::from_corners(start, cp);
+                        }
+                    });
+                    state.invalidate_overlay();
+                }
+                Tool::Ellipse => {
+                    state.scene.update_in_progress(|a| {
+                        if let Annotation::Ellipse { rect, .. } = a {
+                            *rect = LocalRect::from_corners(start, cp);
+                        }
+                    });
+                    state.invalidate_overlay();
+                }
+                Tool::Pixelate => {
+                    state.scene.update_in_progress(|a| {
+                        if let Annotation::Pixelate { rect, .. } = a {
+                            *rect = LocalRect::from_corners(start, cp);
+                        }
+                    });
+                    state.invalidate_overlay();
+                }
+                Tool::Text | Tool::Crop => {}
             }
             UpdateOutcome::None
         }
         Msg::PointerUp => {
+            // Always clear the cached down position, regardless of whether we commit.
             if state.pointer_down.take().is_none() {
                 return UpdateOutcome::None;
             }
-            state.scene.commit_in_progress();
+            let drop = match state.scene.in_progress() {
+                Some(Annotation::Rectangle { rect, .. })
+                | Some(Annotation::Ellipse { rect, .. })
+                | Some(Annotation::Pixelate { rect, .. }) => rect.is_degenerate(),
+                Some(Annotation::Line { from, to, .. })
+                | Some(Annotation::Arrow { from, to, .. }) => {
+                    (from.x - to.x).abs() < 0.5 && (from.y - to.y).abs() < 0.5
+                }
+                Some(Annotation::Pen { points, .. }) => points.len() < 2,
+                _ => false,
+            };
+            if drop {
+                state.scene.cancel_in_progress();
+            } else {
+                state.scene.commit_in_progress();
+            }
             state.invalidate_overlay();
             UpdateOutcome::None
         }
