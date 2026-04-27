@@ -49,6 +49,10 @@ impl AnnotationView {
 
     fn map_pointer(&self, p: IcedPoint) -> Point {
         let (vw, vh) = self.canvas_widget_size;
+        // TODO(task-11): canvas_widget_size is set to (0,0) until the parent plumbs
+        // a window-resize signal into Msg::CanvasResized. The 1:1 fallback is correct
+        // only when the layer surface renders at native (physical) resolution. On HiDPI
+        // outputs with non-1.0 scale this will misalign strokes — verify on Task 11.
         if vw <= 0.0 || vh <= 0.0 {
             return Point { x: p.x, y: p.y };
         }
@@ -60,13 +64,6 @@ impl AnnotationView {
         }
     }
 
-    fn ensure_source(&mut self) -> &Pixmap {
-        if self.source_pixmap.is_none() {
-            self.source_pixmap = Some(pixmap_from_rgba(&self.captured));
-        }
-        self.source_pixmap.as_ref().unwrap()
-    }
-
     pub fn invalidate_overlay(&mut self) {
         if self.scene.is_empty() {
             self.overlay_handle = None;
@@ -74,9 +71,13 @@ impl AnnotationView {
         }
         let w = self.captured.width();
         let h = self.captured.height();
+        // Lazily fill source_pixmap WITHOUT holding a borrow into self afterwards.
+        if self.source_pixmap.is_none() {
+            self.source_pixmap = Some(pixmap_from_rgba(&self.captured));
+        }
         let mut target = Pixmap::new(w, h).expect("non-zero pixmap");
-        let source = self.ensure_source().clone();
-        render_annotations(&mut target, &source, &self.scene);
+        let source = self.source_pixmap.as_ref().unwrap();
+        render_annotations(&mut target, source, &self.scene);
         let rgba = rgba_from_pixmap(&target);
         self.overlay_handle = Some(cosmic::widget::image::Handle::from_rgba(
             w,
@@ -191,6 +192,10 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
             UpdateOutcome::None
         }
         Msg::PointerDown => {
+            // TODO(task-14): handle touch/stylus where PointerDown can fire before any
+            // PointerMove. iced's mouse backend emits CursorMoved first for mice, so this
+            // works for the MVP, but a fresh tap that lands directly on the canvas without
+            // a hover would be silently dropped here.
             let Some(p) = state.last_cursor else {
                 return UpdateOutcome::None;
             };
