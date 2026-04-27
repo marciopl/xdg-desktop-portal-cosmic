@@ -5,6 +5,14 @@ use tiny_skia::Pixmap;
 
 use crate::annotation::model::{AnnotationScene, LocalRect};
 
+use std::cell::RefCell;
+use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache};
+
+thread_local! {
+    static FONT_SYSTEM: RefCell<FontSystem> = RefCell::new(FontSystem::new());
+    static SWASH_CACHE: RefCell<SwashCache> = RefCell::new(SwashCache::new());
+}
+
 /// Convert straight-RGBA RgbaImage → premultiplied tiny-skia Pixmap.
 pub fn pixmap_from_rgba(img: &RgbaImage) -> Pixmap {
     let mut pix = Pixmap::new(img.width(), img.height())
@@ -182,7 +190,48 @@ fn render_one(target: &mut Pixmap, _source: &Pixmap, ann: &crate::annotation::mo
                 ty += ts;
             }
         }
-        // Text implemented in Task 9.
+        Annotation::Text { position, content, font_size, color } => {
+            if content.is_empty() || *font_size <= 0.0 { return; }
+            FONT_SYSTEM.with(|fs_cell| {
+                SWASH_CACHE.with(|sc_cell| {
+                    let mut fs = fs_cell.borrow_mut();
+                    let mut sc = sc_cell.borrow_mut();
+                    let metrics = Metrics::new(*font_size, *font_size * 1.2);
+                    let mut buffer = Buffer::new(&mut fs, metrics);
+                    buffer.set_size(
+                        &mut fs,
+                        Some(target.width() as f32 - position.x),
+                        Some(target.height() as f32 - position.y),
+                    );
+                    buffer.set_text(&mut fs, content, &Attrs::new(), Shaping::Advanced, None);
+                    buffer.shape_until_scroll(&mut fs, false);
+
+                    let [r, g, b, a] = color.into_rgba8();
+                    let cosmic_color = cosmic_text::Color::rgba(r, g, b, a);
+
+                    let target_w = target.width() as i32;
+                    let target_h = target.height() as i32;
+                    let target_data = target.data_mut();
+                    buffer.draw(&mut fs, &mut sc, cosmic_color, |gx, gy, _w, _h, gcolor| {
+                        let px = position.x as i32 + gx;
+                        let py = position.y as i32 + gy;
+                        if px < 0 || py < 0 || px >= target_w || py >= target_h { return; }
+                        let i = ((py * target_w + px) * 4) as usize;
+                        let (sr, sg, sb, sa) = (gcolor.r(), gcolor.g(), gcolor.b(), gcolor.a());
+                        if sa == 0 { return; }
+                        // Premultiplied source over premultiplied dest.
+                        let inv_a = 255 - sa as u32;
+                        let pre = |c: u8| ((c as u32 * sa as u32 + 127) / 255) as u8;
+                        let sr_p = pre(sr); let sg_p = pre(sg); let sb_p = pre(sb);
+                        let blend = |s: u8, d: u8| ((s as u32 + (d as u32 * inv_a + 127) / 255).min(255)) as u8;
+                        target_data[i]     = blend(sr_p, target_data[i]);
+                        target_data[i + 1] = blend(sg_p, target_data[i + 1]);
+                        target_data[i + 2] = blend(sb_p, target_data[i + 2]);
+                        target_data[i + 3] = blend(sa, target_data[i + 3]);
+                    });
+                });
+            });
+        }
         _ => {}
     }
 }
@@ -416,6 +465,39 @@ mod tests {
         render_annotations(&mut canvas, &src, &scene);
         // After 8x8 tile averaging of a 1px checkerboard, every tile averages to ~128.
         assert_snapshot("pixelate_grid", &canvas);
+    }
+
+    #[test]
+    fn snapshot_text_hello() {
+        let mut canvas = solid_canvas(128, 32, [255, 255, 255, 255]);
+        let src = canvas.clone();
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Text {
+            position: Point { x: 8.0, y: 8.0 },
+            content: "Hello".to_string(),
+            font_size: 16.0,
+            color: Color::from_rgb(0.0, 0.0, 0.0),
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        assert_snapshot("text_hello", &canvas);
+    }
+
+    #[test]
+    fn empty_text_is_noop() {
+        let mut canvas = solid_canvas(8, 8, [255, 255, 255, 255]);
+        let before = canvas.data().to_vec();
+        let src = canvas.clone();
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Text {
+            position: Point::default(),
+            content: String::new(),
+            font_size: 16.0,
+            color: Color::from_rgb(0.0, 0.0, 0.0),
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        assert_eq!(canvas.data(), before.as_slice());
     }
 
     #[test]

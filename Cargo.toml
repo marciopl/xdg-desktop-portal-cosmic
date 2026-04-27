@@ -20,6 +20,7 @@ cosmic-files = { git = "https://github.com/pop-os/cosmic-files", default-feature
 ] }
 cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols", rev = "d0e95be" }
 cosmic-client-toolkit = { git = "https://github.com/pop-os/cosmic-protocols", rev = "d0e95be" }
+cosmic-text = { git = "https://github.com/pop-os/cosmic-text.git" }
 futures = "0.3"
 image = "0.25"
 cosmic-bg-config = { git = "https://github.com/pop-os/cosmic-bg" }

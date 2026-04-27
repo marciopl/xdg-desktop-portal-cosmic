@@ -9117,6 +9117,7 @@ dependencies = [
  "cosmic-files",
  "cosmic-portal-config",
  "cosmic-protocols",
+ "cosmic-text",
  "dirs 6.0.0",
  "env_logger",
  "freedesktop-desktop-entry",
