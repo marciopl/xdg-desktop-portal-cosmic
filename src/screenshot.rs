@@ -382,6 +382,10 @@ pub enum Msg {
     OutputChanged(WlOutput),
     WindowChosen(String, usize),
     Location(usize),
+    AnnotateStart(RgbaImage),
+    AnnotateDone,
+    AnnotateCancel,
+    AnnotationInner(crate::annotation::WidgetMsg),
 }
 
 #[derive(Debug, Clone)]
@@ -584,6 +588,11 @@ impl Screenshot {
 }
 
 pub(crate) fn view(portal: &CosmicPortal, id: window::Id) -> cosmic::Element<'_, Msg> {
+    if let Some(av) = portal.annotation_view.as_ref() {
+        // Show the annotation widget. It captures pointer events directly via mouse_area;
+        // keyboard shortcut wiring (KeyboardWrapper) is added in Task 17.
+        return crate::annotation::widget::view(av).map(Msg::AnnotationInner);
+    }
     let Some((i, output)) = portal.outputs.iter().enumerate().find(|(i, o)| o.id == id) else {
         return space::horizontal().width(Length::Fixed(1.0)).into();
     };
@@ -652,7 +661,7 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                 .iter()
                 .map(|o| destroy_layer_surface(o.id))
                 .collect();
-            let Some(args) = portal.screenshot_args.take() else {
+            let Some(args) = portal.screenshot_args.as_ref().cloned() else {
                 log::error!("Failed to find screenshot Args for Capture message.");
                 return cosmic::Task::batch(cmds);
             };
@@ -686,10 +695,6 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                 }
                 Choice::Rectangle(r, s) => {
                     if let Some(RectDimension { width, height }) = r.dimensions() {
-                        // Construct Rgba image with size of rect
-                        // then overlay the part of each image that intersects with the rect
-                        //let mut img = RgbaImage::new(width.get(), height.get());
-
                         let frames = images
                             .into_iter()
                             .filter_map(|(name, raw_img)| {
@@ -701,22 +706,17 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                                     right: pos.0 + output.logical_size.0 as i32,
                                     bottom: pos.1 + output.logical_size.1 as i32,
                                 };
-
-                                let intersect = r.intersect(output_rect)?;
-
+                                let _intersect = r.intersect(output_rect)?;
                                 Some((raw_img.rgba, output_rect))
                             })
                             .collect::<Vec<_>>();
                         let img = combined_image(r, frames);
-
-                        if let Ok(buffer) = Screenshot::save_rgba(&img, image_path.as_deref())
-                            .inspect_err(|err| {
-                                log::error!("Failed to capture screenshot: {:?}", err);
-                                success = false;
-                            })
-                        {
-                            cmds.push(clipboard::write_data(ScreenshotBytes::new(buffer)));
-                        }
+                        // Hand off to Annotating step. screenshot_args is already kept alive
+                        // (see the as_ref().cloned() change at the top of Msg::Capture); we
+                        // just emit AnnotateStart with the cropped capture.
+                        return cosmic::task::message(crate::app::Msg::Screenshot(
+                            Msg::AnnotateStart(img),
+                        ));
                     } else {
                         success = false;
                     }
@@ -874,6 +874,111 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                 log::error!("Failed to find screenshot Args for Location message.");
                 cosmic::Task::none()
             }
+        }
+        Msg::AnnotateStart(captured) => {
+            // Tear down the selection layer surfaces — the annotation view replaces them
+            // visually. We re-create a fresh layer surface for annotation below.
+            let mut cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
+                .outputs
+                .iter()
+                .map(|o| destroy_layer_surface(o.id))
+                .collect();
+            portal.annotation_view = Some(crate::annotation::AnnotationView::new(captured));
+            // Get a fresh layer surface on the primary output for the annotation UI.
+            let primary = portal.outputs.first().cloned();
+            if let Some(o) = primary {
+                cmds.push(get_layer_surface(SctkLayerSurfaceSettings {
+                    id: o.id,
+                    layer: Layer::Overlay,
+                    keyboard_interactivity: KeyboardInteractivity::Exclusive,
+                    input_zone: None,
+                    anchor: Anchor::all(),
+                    output: IcedOutput::Output(o.output.clone()),
+                    namespace: "screenshot-annotate".to_string(),
+                    size: Some((None, None)),
+                    exclusive_zone: -1,
+                    size_limits: Limits::NONE.min_height(1.0).min_width(1.0),
+                    ..Default::default()
+                }));
+            }
+            cosmic::Task::batch(cmds)
+        }
+        Msg::AnnotateDone => {
+            // Composite step is wired in Task 13. For now, save the un-annotated capture
+            // so the flow is testable end-to-end.
+            let view = portal.annotation_view.take();
+            let Some(args) = portal.screenshot_args.take() else {
+                return cosmic::Task::none();
+            };
+            let mut cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
+                .outputs
+                .iter()
+                .map(|o| destroy_layer_surface(o.id))
+                .collect();
+            let Some(view) = view else {
+                return cosmic::Task::batch(cmds);
+            };
+            let img = view.captured;
+            let location = args.location;
+            let tx = args.tx.clone();
+            let path = Screenshot::get_img_path(location);
+            let mut success = true;
+            if let Ok(buffer) = Screenshot::save_rgba(&img, path.as_deref()).inspect_err(|err| {
+                log::error!("save: {err:?}");
+                success = false;
+            }) {
+                cmds.push(clipboard::write_data(ScreenshotBytes::new(buffer)));
+            }
+            let response = if success && path.is_some() {
+                PortalResponse::Success(ScreenshotResult {
+                    uri: format!("file:///{}", path.unwrap().display()),
+                })
+            } else if success {
+                PortalResponse::Success(ScreenshotResult {
+                    uri: "clipboard:///".into(),
+                })
+            } else {
+                PortalResponse::Other
+            };
+            tokio::spawn(async move {
+                let _ = tx.send(response).await;
+            });
+            cosmic::Task::batch(cmds)
+        }
+        Msg::AnnotateCancel => {
+            portal.annotation_view = None;
+            let cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
+                .outputs
+                .iter()
+                .map(|o| destroy_layer_surface(o.id))
+                .collect();
+            let Some(args) = portal.screenshot_args.take() else {
+                return cosmic::Task::batch(cmds);
+            };
+            let tx = args.tx;
+            tokio::spawn(async move {
+                let _ = tx.send(PortalResponse::Cancelled).await;
+            });
+            cosmic::Task::batch(cmds)
+        }
+        Msg::AnnotationInner(m) => update_annotation(portal, m),
+    }
+}
+
+pub fn update_annotation(
+    portal: &mut CosmicPortal,
+    msg: crate::annotation::WidgetMsg,
+) -> cosmic::Task<crate::app::Msg> {
+    let Some(view) = portal.annotation_view.as_mut() else {
+        return cosmic::Task::none();
+    };
+    match crate::annotation::widget::update(view, msg) {
+        crate::annotation::UpdateOutcome::None => cosmic::Task::none(),
+        crate::annotation::UpdateOutcome::Done => {
+            cosmic::task::message(crate::app::Msg::Screenshot(Msg::AnnotateDone))
+        }
+        crate::annotation::UpdateOutcome::Cancel => {
+            cosmic::task::message(crate::app::Msg::Screenshot(Msg::AnnotateCancel))
         }
     }
 }

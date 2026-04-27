@@ -41,6 +41,7 @@ pub struct CosmicPortal {
     pub file_choosers: HashMap<window::Id, (file_chooser::Args, file_chooser::Dialog)>,
 
     pub screenshot_args: Option<screenshot::Args>,
+    pub annotation_view: Option<crate::annotation::AnnotationView>,
     pub screencast_args: Option<screencast_dialog::Args>,
     pub screencast_tab_model:
         widget::segmented_button::Model<widget::segmented_button::SingleSelect>,
@@ -70,6 +71,7 @@ pub enum Msg {
     FileChooser(window::Id, file_chooser::Msg),
     Screenshot(screenshot::Msg),
     Screencast(screencast_dialog::Msg),
+    Annotation(crate::annotation::WidgetMsg),
     Portal(subscription::Event),
     Output(OutputEvent, WlOutput),
     ConfigSetScreenshot(config::screenshot::Screenshot),
@@ -118,6 +120,7 @@ impl cosmic::Application for CosmicPortal {
                 access_args: Default::default(),
                 file_choosers: Default::default(),
                 screenshot_args: Default::default(),
+                annotation_view: None,
                 screencast_args: Default::default(),
                 screencast_tab_model: Default::default(),
                 location_options: Vec::new(),
@@ -201,6 +204,7 @@ impl cosmic::Application for CosmicPortal {
             },
             Msg::Screenshot(m) => screenshot::update_msg(self, m).map(cosmic::Action::App),
             Msg::Screencast(m) => screencast_dialog::update_msg(self, m).map(cosmic::Action::App),
+            Msg::Annotation(m) => crate::screenshot::update_annotation(self, m).map(cosmic::Action::App),
             Msg::Output(o_event, wl_output) => {
                 match o_event {
                     OutputEvent::Created(Some(info))
