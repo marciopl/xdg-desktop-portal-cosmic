@@ -94,6 +94,13 @@ impl AnnotationScene {
         self.in_progress = None;
     }
 
+    pub fn set_crop(&mut self, rect: Option<LocalRect>) {
+        let previous = self.crop;
+        self.crop = rect;
+        self.history.push(Op::SetCrop { previous });
+        self.redo_stack.clear();
+    }
+
     pub fn undo(&mut self) {
         let Some(op) = self.history.pop() else { return };
         match op {
@@ -299,5 +306,75 @@ mod tests {
         let mut s = AnnotationScene::default();
         s.undo(); s.redo();
         assert_eq!(s.iter_committed().count(), 0);
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> LocalRect {
+        LocalRect { origin: Point { x, y }, size: Size { w, h } }
+    }
+
+    #[test]
+    fn set_crop_records_history() {
+        let mut s = AnnotationScene::default();
+        s.set_crop(Some(rect(0.0, 0.0, 100.0, 100.0)));
+        assert_eq!(s.crop(), Some(&rect(0.0, 0.0, 100.0, 100.0)));
+        s.undo();
+        assert_eq!(s.crop(), None);
+    }
+
+    #[test]
+    fn redo_restores_crop() {
+        let mut s = AnnotationScene::default();
+        s.set_crop(Some(rect(0.0, 0.0, 100.0, 100.0)));
+        s.undo();
+        s.redo();
+        assert_eq!(s.crop(), Some(&rect(0.0, 0.0, 100.0, 100.0)));
+    }
+
+    #[test]
+    fn crop_then_resize_undo_returns_to_first_crop() {
+        let mut s = AnnotationScene::default();
+        s.set_crop(Some(rect(0.0, 0.0, 100.0, 100.0)));
+        s.set_crop(Some(rect(0.0, 0.0, 50.0, 50.0)));
+        s.undo();
+        assert_eq!(s.crop(), Some(&rect(0.0, 0.0, 100.0, 100.0)));
+        s.undo();
+        assert_eq!(s.crop(), None);
+    }
+
+    #[test]
+    fn interleaved_item_and_crop_undo_redo() {
+        let mut s = AnnotationScene::default();
+        s.begin(pen()); s.commit_in_progress();
+        s.set_crop(Some(rect(0.0, 0.0, 50.0, 50.0)));
+        s.begin(pen()); s.commit_in_progress();
+
+        // 2 items + crop set
+        assert_eq!(s.iter_committed().count(), 2);
+        assert!(s.crop().is_some());
+
+        s.undo(); // remove second item
+        assert_eq!(s.iter_committed().count(), 1);
+        assert!(s.crop().is_some());
+
+        s.undo(); // remove crop
+        assert_eq!(s.iter_committed().count(), 1);
+        assert_eq!(s.crop(), None);
+
+        s.undo(); // remove first item
+        assert_eq!(s.iter_committed().count(), 0);
+
+        s.redo(); s.redo(); s.redo();
+        assert_eq!(s.iter_committed().count(), 2);
+        assert!(s.crop().is_some());
+    }
+
+    #[test]
+    fn set_crop_none_clears_crop() {
+        let mut s = AnnotationScene::default();
+        s.set_crop(Some(rect(0.0, 0.0, 100.0, 100.0)));
+        s.set_crop(None);
+        assert_eq!(s.crop(), None);
+        s.undo();
+        assert_eq!(s.crop(), Some(&rect(0.0, 0.0, 100.0, 100.0)));
     }
 }
