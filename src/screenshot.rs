@@ -670,6 +670,7 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                 tx,
                 choice,
                 output_images: mut images,
+                toplevel_images,
                 location,
                 ..
             } = args;
@@ -680,14 +681,7 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
             match choice {
                 Choice::Output(name) => {
                     if let Some(img) = images.remove(&name) {
-                        if let Ok(buffer) = Screenshot::save_rgba(&img.rgba, image_path.as_deref())
-                            .inspect_err(|err| {
-                                log::error!("Failed to capture screenshot: {:?}", err);
-                                success = false;
-                            })
-                        {
-                            cmds.push(clipboard::write_data(ScreenshotBytes::new(buffer)));
-                        }
+                        return cosmic::task::message(crate::app::Msg::Screenshot(Msg::AnnotateStart(img.rgba)));
                     } else {
                         log::error!("Failed to find output {}", name);
                         success = false;
@@ -722,19 +716,12 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                     }
                 }
                 Choice::Window(output, Some(window_i)) => {
-                    if let Some(img) = args
-                        .toplevel_images
+                    if let Some(img) = toplevel_images
                         .get(&output)
                         .and_then(|imgs| imgs.get(window_i))
+                        .cloned()
                     {
-                        if let Ok(buffer) = Screenshot::save_rgba(&img.rgba, image_path.as_deref())
-                            .inspect_err(|err| {
-                                log::error!("Failed to capture screenshot: {:?}", err);
-                                success = false;
-                            })
-                        {
-                            cmds.push(clipboard::write_data(ScreenshotBytes::new(buffer)));
-                        }
+                        return cosmic::task::message(crate::app::Msg::Screenshot(Msg::AnnotateStart(img.rgba)));
                     } else {
                         success = false;
                     }
