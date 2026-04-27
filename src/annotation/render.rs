@@ -132,7 +132,57 @@ fn render_one(target: &mut Pixmap, _source: &Pixmap, ann: &crate::annotation::mo
             s.width = stroke.width.max(0.5);
             target.stroke_path(&path, &paint, &s, Transform::identity(), None);
         }
-        // Text + Pixelate implemented in Tasks 8–9.
+        Annotation::Pixelate { rect, tile_size } => {
+            if rect.is_degenerate() || *tile_size == 0 { return; }
+            let tw = target.width() as i32;
+            let th = target.height() as i32;
+            let x0 = (rect.origin.x.round() as i32).max(0);
+            let y0 = (rect.origin.y.round() as i32).max(0);
+            let x1 = ((rect.origin.x + rect.size.w).round() as i32).min(tw);
+            let y1 = ((rect.origin.y + rect.size.h).round() as i32).min(th);
+            if x1 <= x0 || y1 <= y0 { return; }
+            let ts = *tile_size as i32;
+            let src_data = _source.data();
+            let src_stride = _source.width() as i32 * 4;
+
+            let mut ty = y0;
+            while ty < y1 {
+                let mut tx = x0;
+                while tx < x1 {
+                    let bx1 = (tx + ts).min(x1);
+                    let by1 = (ty + ts).min(y1);
+                    let mut r_acc: u64 = 0;
+                    let mut g_acc: u64 = 0;
+                    let mut b_acc: u64 = 0;
+                    let mut a_acc: u64 = 0;
+                    let mut count: u64 = 0;
+                    for py in ty..by1 {
+                        for px in tx..bx1 {
+                            let i = (py * src_stride + px * 4) as usize;
+                            r_acc += src_data[i] as u64;
+                            g_acc += src_data[i + 1] as u64;
+                            b_acc += src_data[i + 2] as u64;
+                            a_acc += src_data[i + 3] as u64;
+                            count += 1;
+                        }
+                    }
+                    if count == 0 { tx += ts; continue; }
+                    let r = (r_acc / count) as u8;
+                    let g = (g_acc / count) as u8;
+                    let b = (b_acc / count) as u8;
+                    let a = (a_acc / count) as u8;
+                    let mut paint = tiny_skia::Paint::default();
+                    paint.set_color_rgba8(r, g, b, a);
+                    let r_ts = match tiny_skia::Rect::from_xywh(tx as f32, ty as f32, (bx1 - tx) as f32, (by1 - ty) as f32) {
+                        Some(r) => r, None => { tx += ts; continue; }
+                    };
+                    target.fill_rect(r_ts, &paint, Transform::identity(), None);
+                    tx += ts;
+                }
+                ty += ts;
+            }
+        }
+        // Text implemented in Task 9.
         _ => {}
     }
 }
@@ -338,5 +388,48 @@ mod tests {
         let img = RgbaImage::new(10, 10);
         let out = apply_crop(img.clone(), None);
         assert_eq!(out.dimensions(), (10, 10));
+    }
+
+    #[test]
+    fn snapshot_pixelate_grid() {
+        // Source: 32x32 image with a checkerboard pattern at 1px granularity.
+        let mut canvas = Pixmap::new(32, 32).unwrap();
+        for y in 0..32u32 {
+            for x in 0..32u32 {
+                let on = (x + y) % 2 == 0;
+                let i = ((y * 32 + x) * 4) as usize;
+                let v = if on { 255 } else { 0 };
+                canvas.data_mut()[i] = v;
+                canvas.data_mut()[i + 1] = v;
+                canvas.data_mut()[i + 2] = v;
+                canvas.data_mut()[i + 3] = 255;
+            }
+        }
+        let src = canvas.clone();
+
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Pixelate {
+            rect: LocalRect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 32.0, h: 32.0 } },
+            tile_size: 8,
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        // After 8x8 tile averaging of a 1px checkerboard, every tile averages to ~128.
+        assert_snapshot("pixelate_grid", &canvas);
+    }
+
+    #[test]
+    fn pixelate_zero_tile_size_is_noop() {
+        let mut canvas = solid_canvas(8, 8, [100, 100, 100, 255]);
+        let before = canvas.data().to_vec();
+        let src = canvas.clone();
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Pixelate {
+            rect: LocalRect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 8.0, h: 8.0 } },
+            tile_size: 0,
+        });
+        scene.commit_in_progress();
+        render_annotations(&mut canvas, &src, &scene);
+        assert_eq!(canvas.data(), before.as_slice());
     }
 }
