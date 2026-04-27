@@ -21,6 +21,7 @@ impl LocalRect {
         Self { origin: Point { x, y }, size: Size { w, h } }
     }
 
+    /// Hit test. Inclusive on all four edges — a point exactly on the right/bottom edge counts as inside.
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.origin.x
             && p.y >= self.origin.y
@@ -28,6 +29,8 @@ impl LocalRect {
             && p.y <= self.origin.y + self.size.h
     }
 
+    /// True when either extent is below half a pixel — too small to render meaningfully.
+    /// Used as a render-time guard against zero-size shapes from click-without-drag input.
     pub fn is_degenerate(&self) -> bool {
         self.size.w <= 0.5 || self.size.h <= 0.5
     }
