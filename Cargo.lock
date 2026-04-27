@@ -9137,6 +9137,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "tempfile",
+ "tiny-skia",
  "tokio",
  "url",
  "wayland-client",
