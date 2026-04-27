@@ -905,7 +905,17 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
             let Some(view) = view else {
                 return cosmic::Task::batch(cmds);
             };
-            let img = view.captured;
+            let scene = view.scene.clone();
+            let captured = view.captured;
+            let img = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::annotation::composite_annotations(captured.clone(), &scene)
+            })) {
+                Ok(out) => out,
+                Err(panic) => {
+                    log::error!("annotation composite panicked: {panic:?}; saving raw capture");
+                    captured
+                }
+            };
             let location = args.location;
             let tx = args.tx.clone();
             let path = Screenshot::get_img_path(location);

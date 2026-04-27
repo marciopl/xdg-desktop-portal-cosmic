@@ -514,4 +514,28 @@ mod tests {
         render_annotations(&mut canvas, &src, &scene);
         assert_eq!(canvas.data(), before.as_slice());
     }
+
+    #[test]
+    fn composite_without_crop_preserves_dimensions() {
+        let mut img = RgbaImage::new(100, 80);
+        for p in img.pixels_mut() { *p = Rgba([0, 0, 0, 255]); }
+        let mut scene = AnnotationScene::default();
+        scene.begin(Annotation::Pen {
+            points: vec![Point { x: 5.0, y: 5.0 }, Point { x: 50.0, y: 50.0 }],
+            stroke: Stroke { width: 2.0, color: Color::from_rgb(1.0, 0.0, 0.0) },
+        });
+        scene.commit_in_progress();
+        let out = composite_annotations(img, &scene);
+        assert_eq!(out.dimensions(), (100, 80));
+    }
+
+    #[test]
+    fn composite_with_crop_dimensions_match_crop() {
+        let mut img = RgbaImage::new(100, 80);
+        for p in img.pixels_mut() { *p = Rgba([0, 0, 0, 255]); }
+        let mut scene = AnnotationScene::default();
+        scene.set_crop(Some(LocalRect { origin: Point { x: 10.0, y: 5.0 }, size: Size { w: 40.0, h: 30.0 } }));
+        let out = composite_annotations(img, &scene);
+        assert_eq!(out.dimensions(), (40, 30));
+    }
 }
