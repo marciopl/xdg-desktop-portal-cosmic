@@ -13,3 +13,21 @@ share-screen = Share your screen
 unknown-application = Unknown Application
 output = Output
 window = Window
+
+# Annotation tool
+annotate-done = Done
+annotate-cancel = Cancel
+annotate-undo = Undo
+annotate-redo = Redo
+annotate-reset-crop = Reset crop
+tool-pen = Pen
+tool-line = Line
+tool-arrow = Arrow
+tool-rectangle = Rectangle
+tool-ellipse = Ellipse
+tool-text = Text
+tool-pixelate = Pixelate
+tool-crop = Crop
+stroke-width = Stroke width
+text-size = Text size
+tile-size = Tile size
