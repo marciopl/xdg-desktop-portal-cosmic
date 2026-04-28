@@ -1,5 +1,7 @@
 #![allow(dead_code, unused_variables)]
 
+use std::time::{Duration, Instant};
+
 use cosmic::Element;
 use cosmic::iced::Length;
 use cosmic::iced::widget::Stack;
@@ -11,7 +13,9 @@ use tiny_skia::Pixmap;
 use crate::annotation::model::{
     Annotation, AnnotationScene, Color, LocalRect, Point, Size, Stroke, Tool, ToolState,
 };
-use crate::annotation::render::{pixmap_from_rgba, render_annotations, rgba_from_pixmap};
+use crate::annotation::render::{
+    pixmap_from_rgba, render_committed, render_overlay_top, rgba_from_pixmap,
+};
 use crate::fl;
 
 pub struct TextEditState {
@@ -27,6 +31,16 @@ pub struct AnnotationView {
     pub tools: ToolState,
     pub overlay_handle: Option<cosmic::widget::image::Handle>,
     source_pixmap: Option<Pixmap>,
+    /// Cached pixmap of all committed annotations (no in-progress, no crop dim).
+    /// Cloned each frame and topped with in-progress + crop dim, avoiding a full
+    /// scene re-rasterization on every PointerMove.
+    committed_overlay: Option<Pixmap>,
+    /// Snapshot of `scene.committed_version()` at the time committed_overlay was
+    /// last rebuilt. Mismatch triggers a rebuild.
+    committed_version_cached: u64,
+    /// Last time `invalidate_overlay` actually re-rendered. Used by the throttled
+    /// variant to coalesce multiple PointerMove events into one redraw per frame.
+    last_invalidate: Option<Instant>,
     pointer_down: Option<Point>,
     /// Last cursor position seen via on_move, in widget-local logical pixels.
     last_cursor: Option<IcedPoint>,
@@ -36,6 +50,8 @@ pub struct AnnotationView {
     /// Pending text edit: position (canvas-local), current text buffer, focus id.
     pub text_edit: Option<TextEditState>,
 }
+
+const MIN_INVALIDATE_INTERVAL: Duration = Duration::from_millis(16);
 
 impl AnnotationView {
     pub fn new(captured: RgbaImage) -> Self {
@@ -51,6 +67,9 @@ impl AnnotationView {
             tools: ToolState::default(),
             overlay_handle: None,
             source_pixmap: None,
+            committed_overlay: None,
+            committed_version_cached: 0,
+            last_invalidate: None,
             pointer_down: None,
             last_cursor: None,
             canvas_widget_size: (0.0, 0.0),
@@ -75,20 +94,65 @@ impl AnnotationView {
         }
     }
 
+    /// Re-render the overlay handle from current scene state. Always runs —
+    /// use whenever the next frame must be guaranteed to render (PointerUp,
+    /// undo/redo, tool/color/text changes). For pointer-move drags where
+    /// dropping intermediate frames is acceptable, prefer the throttled variant.
     pub fn invalidate_overlay(&mut self) {
+        self.last_invalidate = Some(Instant::now());
+        self.do_invalidate_overlay();
+    }
+
+    /// Re-render the overlay handle, but skip if the previous redraw happened
+    /// less than `MIN_INVALIDATE_INTERVAL` ago. Use for pointer-move drags
+    /// where dropping intermediate frames is acceptable.
+    pub fn invalidate_overlay_throttled(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.last_invalidate {
+            if now.duration_since(last) < MIN_INVALIDATE_INTERVAL {
+                return;
+            }
+        }
+        self.last_invalidate = Some(now);
+        self.do_invalidate_overlay();
+    }
+
+    fn do_invalidate_overlay(&mut self) {
         if self.scene.is_empty() {
             self.overlay_handle = None;
+            self.committed_overlay = None;
+            // Reset the cache key so the next non-empty render unconditionally
+            // rebuilds, even if the scene's committed_version happens to match
+            // an older cached value.
+            self.committed_version_cached = 0;
             return;
         }
         let w = self.captured.width();
         let h = self.captured.height();
-        // Lazily fill source_pixmap WITHOUT holding a borrow into self afterwards.
         if self.source_pixmap.is_none() {
             self.source_pixmap = Some(pixmap_from_rgba(&self.captured));
         }
-        let mut target = Pixmap::new(w, h).expect("non-zero pixmap");
         let source = self.source_pixmap.as_ref().unwrap();
-        render_annotations(&mut target, source, &self.scene);
+
+        // Rebuild the committed cache only when the scene's committed_version
+        // has changed (commit / undo / redo / set_crop). Mid-drag updates to
+        // the in-progress annotation don't bump version, so we reuse the cache.
+        let scene_version = self.scene.committed_version();
+        if self.committed_overlay.is_none() || scene_version != self.committed_version_cached {
+            let mut cache = Pixmap::new(w, h).expect("non-zero pixmap");
+            render_committed(&mut cache, source, &self.scene);
+            self.committed_overlay = Some(cache);
+            self.committed_version_cached = scene_version;
+        }
+
+        // Per-frame: clone the cache and paint in-progress + crop dim on top.
+        let mut target = self
+            .committed_overlay
+            .as_ref()
+            .expect("rebuilt above")
+            .clone();
+        render_overlay_top(&mut target, source, &self.scene);
+
         let rgba = rgba_from_pixmap(&target);
         self.overlay_handle = Some(cosmic::widget::image::Handle::from_rgba(
             w,
@@ -464,6 +528,7 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                 return UpdateOutcome::None;
             };
             let cp = state.map_pointer(p);
+            let mut should_redraw = true;
             match state.tools.active_tool {
                 Tool::Pen => {
                     state.scene.update_in_progress(|a| {
@@ -471,7 +536,6 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                             points.push(cp);
                         }
                     });
-                    state.invalidate_overlay();
                 }
                 Tool::Line => {
                     state.scene.update_in_progress(|a| {
@@ -479,7 +543,6 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                             *to = cp;
                         }
                     });
-                    state.invalidate_overlay();
                 }
                 Tool::Arrow => {
                     state.scene.update_in_progress(|a| {
@@ -487,7 +550,6 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                             *to = cp;
                         }
                     });
-                    state.invalidate_overlay();
                 }
                 Tool::Rectangle => {
                     state.scene.update_in_progress(|a| {
@@ -495,7 +557,6 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                             *rect = LocalRect::from_corners(start, cp);
                         }
                     });
-                    state.invalidate_overlay();
                 }
                 Tool::Ellipse => {
                     state.scene.update_in_progress(|a| {
@@ -503,7 +564,6 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                             *rect = LocalRect::from_corners(start, cp);
                         }
                     });
-                    state.invalidate_overlay();
                 }
                 Tool::Pixelate => {
                     state.scene.update_in_progress(|a| {
@@ -511,7 +571,6 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                             *rect = LocalRect::from_corners(start, cp);
                         }
                     });
-                    state.invalidate_overlay();
                 }
                 Tool::Crop => {
                     state.scene.update_in_progress(|a| {
@@ -519,9 +578,13 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                             *rect = LocalRect::from_corners(start, cp);
                         }
                     });
-                    state.invalidate_overlay();
                 }
-                Tool::Text => {}
+                Tool::Text => {
+                    should_redraw = false;
+                }
+            }
+            if should_redraw {
+                state.invalidate_overlay_throttled();
             }
             UpdateOutcome::None
         }

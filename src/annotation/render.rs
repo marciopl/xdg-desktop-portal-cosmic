@@ -47,7 +47,22 @@ pub fn rgba_from_pixmap(pix: &Pixmap) -> RgbaImage {
 }
 
 pub fn render_annotations(target: &mut Pixmap, source: &Pixmap, scene: &AnnotationScene) {
-    for ann in scene.iter_committed().chain(scene.in_progress()) {
+    render_committed(target, source, scene);
+    render_overlay_top(target, source, scene);
+}
+
+/// Render only committed annotations onto `target`. No in-progress, no crop dim.
+/// Used by the widget to cache the static portion of the overlay between strokes.
+pub fn render_committed(target: &mut Pixmap, source: &Pixmap, scene: &AnnotationScene) {
+    for ann in scene.iter_committed() {
+        render_one(target, source, ann);
+    }
+}
+
+/// Render the dynamic overlay layer: in-progress annotation followed by the crop dim.
+/// Drawn on top of `render_committed`'s output to produce the live preview each frame.
+pub fn render_overlay_top(target: &mut Pixmap, source: &Pixmap, scene: &AnnotationScene) {
+    if let Some(ann) = scene.in_progress() {
         render_one(target, source, ann);
     }
     if let Some(crop) = scene.crop() {

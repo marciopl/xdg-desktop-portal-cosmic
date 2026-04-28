@@ -69,6 +69,10 @@ pub struct AnnotationScene {
     crop: Option<LocalRect>,
     history: Vec<Op>,
     redo_stack: Vec<(Op, RedoData)>,
+    /// Monotonic counter incremented on any change to *committed* state
+    /// (items or crop). The in-progress annotation does NOT bump it.
+    /// Consumers (widget overlay cache) compare against this to invalidate.
+    committed_version: u64,
 }
 
 impl AnnotationScene {
@@ -87,6 +91,7 @@ impl AnnotationScene {
             self.items.push(ann);
             self.history.push(Op::AddItem);
             self.redo_stack.clear();
+            self.committed_version = self.committed_version.wrapping_add(1);
         }
     }
 
@@ -99,6 +104,7 @@ impl AnnotationScene {
         self.crop = rect;
         self.history.push(Op::SetCrop { previous });
         self.redo_stack.clear();
+        self.committed_version = self.committed_version.wrapping_add(1);
     }
 
     pub fn undo(&mut self) {
@@ -115,6 +121,7 @@ impl AnnotationScene {
                 self.redo_stack.push((Op::SetCrop { previous }, RedoData::Crop(current)));
             }
         }
+        self.committed_version = self.committed_version.wrapping_add(1);
     }
 
     pub fn redo(&mut self) {
@@ -131,6 +138,13 @@ impl AnnotationScene {
             }
             _ => unreachable!("redo data shape mismatched op"),
         }
+        self.committed_version = self.committed_version.wrapping_add(1);
+    }
+
+    /// Monotonic counter that bumps on any change to committed state.
+    /// Used by overlay caches to detect when a full re-render is needed.
+    pub fn committed_version(&self) -> u64 {
+        self.committed_version
     }
 
     pub fn iter_committed(&self) -> impl Iterator<Item = &Annotation> {
@@ -376,5 +390,51 @@ mod tests {
         assert_eq!(s.crop(), None);
         s.undo();
         assert_eq!(s.crop(), Some(&rect(0.0, 0.0, 100.0, 100.0)));
+    }
+
+    #[test]
+    fn committed_version_bumps_only_on_committed_state_changes() {
+        let mut s = AnnotationScene::default();
+        let v0 = s.committed_version();
+
+        // begin / update_in_progress / cancel_in_progress are in-progress only — must NOT bump.
+        s.begin(pen());
+        assert_eq!(s.committed_version(), v0, "begin must not bump");
+        s.update_in_progress(|a| {
+            if let Annotation::Pen { points, .. } = a {
+                points.push(Point { x: 1.0, y: 1.0 });
+            }
+        });
+        assert_eq!(s.committed_version(), v0, "update_in_progress must not bump");
+        s.cancel_in_progress();
+        assert_eq!(s.committed_version(), v0, "cancel_in_progress must not bump");
+
+        // commit / set_crop / undo / redo MUST bump on each successful invocation.
+        s.begin(pen());
+        s.commit_in_progress();
+        let v1 = s.committed_version();
+        assert_ne!(v1, v0, "commit_in_progress must bump");
+
+        s.set_crop(Some(rect(0.0, 0.0, 10.0, 10.0)));
+        let v2 = s.committed_version();
+        assert_ne!(v2, v1, "set_crop must bump");
+
+        s.undo();
+        let v3 = s.committed_version();
+        assert_ne!(v3, v2, "undo must bump");
+
+        s.redo();
+        let v4 = s.committed_version();
+        assert_ne!(v4, v3, "redo must bump");
+    }
+
+    #[test]
+    fn committed_version_no_bump_on_empty_history() {
+        let mut s = AnnotationScene::default();
+        let v0 = s.committed_version();
+        s.undo();
+        assert_eq!(s.committed_version(), v0, "undo with empty history must not bump");
+        s.redo();
+        assert_eq!(s.committed_version(), v0, "redo with empty stack must not bump");
     }
 }
