@@ -50,6 +50,37 @@ pub fn render_annotations(target: &mut Pixmap, source: &Pixmap, scene: &Annotati
     for ann in scene.iter_committed().chain(scene.in_progress()) {
         render_one(target, source, ann);
     }
+    if let Some(crop) = scene.crop() {
+        render_crop_dim(target, crop);
+    }
+}
+
+fn render_crop_dim(target: &mut Pixmap, crop: &LocalRect) {
+    use tiny_skia::{FillRule, Paint, PathBuilder, Transform};
+    let w = target.width() as f32;
+    let h = target.height() as f32;
+    // Even-odd path: outer rect = whole canvas, inner rect = crop. Filling with even-odd
+    // produces a frame — everything except the crop interior.
+    let outer = match tiny_skia::Rect::from_xywh(0.0, 0.0, w, h) {
+        Some(r) => r,
+        None => return,
+    };
+    let inner = match tiny_skia::Rect::from_xywh(
+        crop.origin.x,
+        crop.origin.y,
+        crop.size.w.max(0.0),
+        crop.size.h.max(0.0),
+    ) {
+        Some(r) => r,
+        None => return,
+    };
+    let mut pb = PathBuilder::new();
+    pb.push_rect(outer);
+    pb.push_rect(inner);
+    let Some(path) = pb.finish() else { return };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(0, 0, 0, 128);
+    target.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
 }
 
 fn render_one(target: &mut Pixmap, _source: &Pixmap, ann: &crate::annotation::model::Annotation) {

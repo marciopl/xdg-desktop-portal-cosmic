@@ -105,6 +105,7 @@ pub enum Msg {
     SelectTool(Tool),
     Undo,
     Redo,
+    ResetCrop,
     PointerDown,
     PointerMove(IcedPoint),
     PointerUp,
@@ -174,41 +175,42 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
     .into()
 }
 
-fn build_toolbar(state: &AnnotationView) -> Element<'_, Msg> {
-    let tool_btn = |label: String, t: Tool| {
+fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
+    let tool_btn = |label: String, t: Tool| -> Element<'a, Msg> {
         let mut b = button::standard(label).on_press(Msg::SelectTool(t));
         if state.tools.active_tool == t {
             b = b.class(cosmic::theme::Button::Suggested);
         }
-        b
+        b.into()
     };
 
-    row::with_children(vec![
-        tool_btn(fl!("tool-pen"), Tool::Pen).into(),
-        tool_btn(fl!("tool-line"), Tool::Line).into(),
-        tool_btn(fl!("tool-arrow"), Tool::Arrow).into(),
-        tool_btn(fl!("tool-rectangle"), Tool::Rectangle).into(),
-        tool_btn(fl!("tool-ellipse"), Tool::Ellipse).into(),
-        tool_btn(fl!("tool-text"), Tool::Text).into(),
-        tool_btn(fl!("tool-pixelate"), Tool::Pixelate).into(),
-        tool_btn(fl!("tool-crop"), Tool::Crop).into(),
-        space::horizontal().width(Length::Fill).into(),
-        button::standard(fl!("annotate-undo"))
-            .on_press(Msg::Undo)
-            .into(),
-        button::standard(fl!("annotate-redo"))
-            .on_press(Msg::Redo)
-            .into(),
-        button::standard(fl!("annotate-cancel"))
-            .on_press(Msg::Cancel)
-            .into(),
-        button::suggested(fl!("annotate-done"))
-            .on_press(Msg::Done)
-            .into(),
-    ])
-    .spacing(8)
-    .padding(8)
-    .into()
+    let mut children: Vec<Element<'_, Msg>> = vec![
+        tool_btn(fl!("tool-pen"), Tool::Pen),
+        tool_btn(fl!("tool-line"), Tool::Line),
+        tool_btn(fl!("tool-arrow"), Tool::Arrow),
+        tool_btn(fl!("tool-rectangle"), Tool::Rectangle),
+        tool_btn(fl!("tool-ellipse"), Tool::Ellipse),
+        tool_btn(fl!("tool-text"), Tool::Text),
+        tool_btn(fl!("tool-pixelate"), Tool::Pixelate),
+        tool_btn(fl!("tool-crop"), Tool::Crop),
+    ];
+    if state.tools.active_tool == Tool::Crop {
+        children.push(
+            button::standard(fl!("annotate-reset-crop"))
+                .on_press(Msg::ResetCrop)
+                .into(),
+        );
+    }
+    children.push(space::horizontal().width(Length::Fill).into());
+    children.push(button::standard(fl!("annotate-undo")).on_press(Msg::Undo).into());
+    children.push(button::standard(fl!("annotate-redo")).on_press(Msg::Redo).into());
+    children.push(button::standard(fl!("annotate-cancel")).on_press(Msg::Cancel).into());
+    children.push(button::suggested(fl!("annotate-done")).on_press(Msg::Done).into());
+
+    row::with_children(children)
+        .spacing(8)
+        .padding(8)
+        .into()
 }
 
 pub enum UpdateOutcome {
@@ -232,6 +234,11 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
         }
         Msg::Redo => {
             state.scene.redo();
+            state.invalidate_overlay();
+            UpdateOutcome::None
+        }
+        Msg::ResetCrop => {
+            state.scene.set_crop(None);
             state.invalidate_overlay();
             UpdateOutcome::None
         }
@@ -304,8 +311,18 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                     });
                     state.pointer_down = None; // Text doesn't drag.
                 }
-                // Crop tool is wired in Task 16.
-                Tool::Crop => {}
+                Tool::Crop => {
+                    state.scene.begin(Annotation::Rectangle {
+                        rect: LocalRect {
+                            origin: cp,
+                            size: Size { w: 0.0, h: 0.0 },
+                        },
+                        stroke: Stroke {
+                            width: 2.0,
+                            color: state.tools.color,
+                        },
+                    });
+                }
             }
             UpdateOutcome::None
         }
@@ -364,13 +381,33 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                     });
                     state.invalidate_overlay();
                 }
-                Tool::Text | Tool::Crop => {}
+                Tool::Crop => {
+                    state.scene.update_in_progress(|a| {
+                        if let Annotation::Rectangle { rect, .. } = a {
+                            *rect = LocalRect::from_corners(start, cp);
+                        }
+                    });
+                    state.invalidate_overlay();
+                }
+                Tool::Text => {}
             }
             UpdateOutcome::None
         }
         Msg::PointerUp => {
             // Always clear the cached down position, regardless of whether we commit.
             if state.pointer_down.take().is_none() {
+                return UpdateOutcome::None;
+            }
+            if state.tools.active_tool == Tool::Crop {
+                let rect = match state.scene.in_progress() {
+                    Some(Annotation::Rectangle { rect, .. }) if !rect.is_degenerate() => Some(*rect),
+                    _ => None,
+                };
+                state.scene.cancel_in_progress();
+                if let Some(r) = rect {
+                    state.scene.set_crop(Some(r));
+                }
+                state.invalidate_overlay();
                 return UpdateOutcome::None;
             }
             let drop = match state.scene.in_progress() {
