@@ -1,20 +1,14 @@
 #![allow(dead_code, unused_variables)]
 
-use std::time::{Duration, Instant};
-
 use cosmic::Element;
-use cosmic::iced::Length;
 use cosmic::iced::widget::Stack;
-use cosmic::iced_core::Point as IcedPoint;
-use cosmic::widget::{button, column, container, icon, mouse_area, row, space, text};
+use cosmic::iced::{Length, Pixels, Vector};
+use cosmic::iced::widget::canvas;
+use cosmic::widget::{button, column, container, icon, row, space, text};
 use image::RgbaImage;
-use tiny_skia::Pixmap;
 
 use crate::annotation::model::{
     Annotation, AnnotationScene, Color, LocalRect, Point, Size, Stroke, Tool, ToolState,
-};
-use crate::annotation::render::{
-    pixmap_from_rgba, render_committed, render_overlay_top, rgba_from_pixmap,
 };
 use crate::fl;
 
@@ -29,29 +23,19 @@ pub struct AnnotationView {
     pub captured_handle: cosmic::widget::image::Handle,
     pub scene: AnnotationScene,
     pub tools: ToolState,
-    pub overlay_handle: Option<cosmic::widget::image::Handle>,
-    source_pixmap: Option<Pixmap>,
-    /// Cached pixmap of all committed annotations (no in-progress, no crop dim).
-    /// Cloned each frame and topped with in-progress + crop dim, avoiding a full
-    /// scene re-rasterization on every PointerMove.
-    committed_overlay: Option<Pixmap>,
-    /// Snapshot of `scene.committed_version()` at the time committed_overlay was
-    /// last rebuilt. Mismatch triggers a rebuild.
+    /// Geometry cache for committed annotations. Cleared only when
+    /// `scene.committed_version()` changes (commit / undo / redo / set_crop).
+    committed_cache: canvas::Cache,
+    /// Geometry cache for in-progress annotation + crop dim. Cleared on every
+    /// scene-mutation message — these layers change on every PointerMove.
+    overlay_cache: canvas::Cache,
+    /// Snapshot of `scene.committed_version()` last time the committed cache
+    /// was rebuilt. Mismatch triggers a rebuild.
     committed_version_cached: u64,
-    /// Last time `invalidate_overlay` actually re-rendered. Used by the throttled
-    /// variant to coalesce multiple PointerMove events into one redraw per frame.
-    last_invalidate: Option<Instant>,
     pointer_down: Option<Point>,
-    /// Last cursor position seen via on_move, in widget-local logical pixels.
-    last_cursor: Option<IcedPoint>,
-    /// Logical-pixel size of the rendered canvas widget. When (0,0), coordinates are mapped
-    /// 1:1 from widget pixels to canvas pixels.
-    canvas_widget_size: (f32, f32),
     /// Pending text edit: position (canvas-local), current text buffer, focus id.
     pub text_edit: Option<TextEditState>,
 }
-
-const MIN_INVALIDATE_INTERVAL: Duration = Duration::from_millis(16);
 
 impl AnnotationView {
     pub fn new(captured: RgbaImage) -> Self {
@@ -65,100 +49,26 @@ impl AnnotationView {
             captured_handle,
             scene: AnnotationScene::default(),
             tools: ToolState::default(),
-            overlay_handle: None,
-            source_pixmap: None,
-            committed_overlay: None,
+            committed_cache: canvas::Cache::default(),
+            overlay_cache: canvas::Cache::default(),
             committed_version_cached: 0,
-            last_invalidate: None,
             pointer_down: None,
-            last_cursor: None,
-            canvas_widget_size: (0.0, 0.0),
             text_edit: None,
         }
     }
 
-    fn map_pointer(&self, p: IcedPoint) -> Point {
-        let (vw, vh) = self.canvas_widget_size;
-        // TODO(task-11): canvas_widget_size is set to (0,0) until the parent plumbs
-        // a window-resize signal into Msg::CanvasResized. The 1:1 fallback is correct
-        // only when the layer surface renders at native (physical) resolution. On HiDPI
-        // outputs with non-1.0 scale this will misalign strokes — verify on Task 11.
-        if vw <= 0.0 || vh <= 0.0 {
-            return Point { x: p.x, y: p.y };
-        }
-        let scale_x = self.captured.width() as f32 / vw;
-        let scale_y = self.captured.height() as f32 / vh;
-        Point {
-            x: p.x * scale_x,
-            y: p.y * scale_y,
-        }
-    }
-
-    /// Re-render the overlay handle from current scene state. Always runs —
-    /// use whenever the next frame must be guaranteed to render (PointerUp,
-    /// undo/redo, tool/color/text changes). For pointer-move drags where
-    /// dropping intermediate frames is acceptable, prefer the throttled variant.
-    pub fn invalidate_overlay(&mut self) {
-        self.last_invalidate = Some(Instant::now());
-        self.do_invalidate_overlay();
-    }
-
-    /// Re-render the overlay handle, but skip if the previous redraw happened
-    /// less than `MIN_INVALIDATE_INTERVAL` ago. Use for pointer-move drags
-    /// where dropping intermediate frames is acceptable.
-    pub fn invalidate_overlay_throttled(&mut self) {
-        let now = Instant::now();
-        if let Some(last) = self.last_invalidate {
-            if now.duration_since(last) < MIN_INVALIDATE_INTERVAL {
-                return;
-            }
-        }
-        self.last_invalidate = Some(now);
-        self.do_invalidate_overlay();
-    }
-
-    fn do_invalidate_overlay(&mut self) {
-        if self.scene.is_empty() {
-            self.overlay_handle = None;
-            self.committed_overlay = None;
-            // Reset the cache key so the next non-empty render unconditionally
-            // rebuilds, even if the scene's committed_version happens to match
-            // an older cached value.
-            self.committed_version_cached = 0;
-            return;
-        }
-        let w = self.captured.width();
-        let h = self.captured.height();
-        if self.source_pixmap.is_none() {
-            self.source_pixmap = Some(pixmap_from_rgba(&self.captured));
-        }
-        let source = self.source_pixmap.as_ref().unwrap();
-
-        // Rebuild the committed cache only when the scene's committed_version
-        // has changed (commit / undo / redo / set_crop). Mid-drag updates to
-        // the in-progress annotation don't bump version, so we reuse the cache.
+    /// Invalidate the canvas geometry caches. The overlay (in-progress + crop dim)
+    /// is always cleared. The committed cache is only cleared when
+    /// `scene.committed_version()` differs from the last snapshot — mid-drag
+    /// updates to the in-progress annotation don't bump version, so the committed
+    /// geometry is reused.
+    pub fn invalidate_caches(&mut self) {
         let scene_version = self.scene.committed_version();
-        if self.committed_overlay.is_none() || scene_version != self.committed_version_cached {
-            let mut cache = Pixmap::new(w, h).expect("non-zero pixmap");
-            render_committed(&mut cache, source, &self.scene);
-            self.committed_overlay = Some(cache);
+        if scene_version != self.committed_version_cached {
+            self.committed_cache.clear();
             self.committed_version_cached = scene_version;
         }
-
-        // Per-frame: clone the cache and paint in-progress + crop dim on top.
-        let mut target = self
-            .committed_overlay
-            .as_ref()
-            .expect("rebuilt above")
-            .clone();
-        render_overlay_top(&mut target, source, &self.scene);
-
-        let rgba = rgba_from_pixmap(&target);
-        self.overlay_handle = Some(cosmic::widget::image::Handle::from_rgba(
-            w,
-            h,
-            rgba.into_vec(),
-        ));
+        self.overlay_cache.clear();
     }
 }
 
@@ -170,10 +80,9 @@ pub enum Msg {
     Undo,
     Redo,
     ResetCrop,
-    PointerDown,
-    PointerMove(IcedPoint),
-    PointerUp,
-    CanvasResized { width: f32, height: f32 },
+    PointerDown(Point),
+    PointerMove(Point),
+    PointerUp(Point),
     TextEditChanged(String),
     TextEditSubmit,
     TextEditCancel,
@@ -191,25 +100,25 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
     let img_w = Length::Fixed(state.captured.width() as f32);
     let img_h = Length::Fixed(state.captured.height() as f32);
 
-    let bg: Element<'_, Msg> = cosmic::widget::image(state.captured_handle.clone())
+    let bg_image: Element<'_, Msg> = cosmic::widget::image(state.captured_handle.clone())
         .width(img_w)
         .height(img_h)
         .into();
-    let overlay: Element<'_, Msg> = match &state.overlay_handle {
-        Some(h) => cosmic::widget::image(h.clone())
-            .width(img_w)
-            .height(img_h)
-            .into(),
-        None => space::horizontal().width(Length::Fixed(0.0)).into(),
-    };
 
-    let canvas_stack = Stack::with_children(vec![bg, overlay])
+    let canvas_overlay: Element<'_, Msg> = cosmic::widget::canvas(AnnotationProgram {
+        captured: &state.captured,
+        scene: &state.scene,
+        committed_cache: &state.committed_cache,
+        overlay_cache: &state.overlay_cache,
+    })
+    .width(img_w)
+    .height(img_h)
+    .into();
+
+    let canvas_layer: Element<'_, Msg> = Stack::with_children(vec![bg_image, canvas_overlay])
         .width(img_w)
-        .height(img_h);
-    let canvas_area = mouse_area(canvas_stack)
-        .on_press(Msg::PointerDown)
-        .on_move(Msg::PointerMove)
-        .on_release(Msg::PointerUp);
+        .height(img_h)
+        .into();
 
     // If a text edit is in progress, layer a positioned text_input over the canvas.
     let canvas_element: Element<'_, Msg> = if let Some(te) = &state.text_edit {
@@ -230,12 +139,12 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
             .into(),
         ])
         .into();
-        Stack::with_children(vec![canvas_area.into(), positioned])
+        Stack::with_children(vec![canvas_layer, positioned])
             .width(img_w)
             .height(img_h)
             .into()
     } else {
-        canvas_area.into()
+        canvas_layer
     };
 
     column::with_children(vec![toolbar, canvas_element])
@@ -425,32 +334,20 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
         }
         Msg::Undo => {
             state.scene.undo();
-            state.invalidate_overlay();
+            state.invalidate_caches();
             UpdateOutcome::None
         }
         Msg::Redo => {
             state.scene.redo();
-            state.invalidate_overlay();
+            state.invalidate_caches();
             UpdateOutcome::None
         }
         Msg::ResetCrop => {
             state.scene.set_crop(None);
-            state.invalidate_overlay();
+            state.invalidate_caches();
             UpdateOutcome::None
         }
-        Msg::CanvasResized { width, height } => {
-            state.canvas_widget_size = (width, height);
-            UpdateOutcome::None
-        }
-        Msg::PointerDown => {
-            // TODO(task-14): handle touch/stylus where PointerDown can fire before any
-            // PointerMove. iced's mouse backend emits CursorMoved first for mice, so this
-            // works for the MVP, but a fresh tap that lands directly on the canvas without
-            // a hover would be silently dropped here.
-            let Some(p) = state.last_cursor else {
-                return UpdateOutcome::None;
-            };
-            let cp = state.map_pointer(p);
+        Msg::PointerDown(cp) => {
             state.pointer_down = Some(cp);
             let stroke = Stroke {
                 width: state.tools.stroke_width,
@@ -520,15 +417,13 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                     });
                 }
             }
+            state.invalidate_caches();
             UpdateOutcome::None
         }
-        Msg::PointerMove(p) => {
-            state.last_cursor = Some(p);
+        Msg::PointerMove(cp) => {
             let Some(start) = state.pointer_down else {
                 return UpdateOutcome::None;
             };
-            let cp = state.map_pointer(p);
-            let mut should_redraw = true;
             match state.tools.active_tool {
                 Tool::Pen => {
                     state.scene.update_in_progress(|a| {
@@ -580,15 +475,13 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                     });
                 }
                 Tool::Text => {
-                    should_redraw = false;
+                    return UpdateOutcome::None;
                 }
             }
-            if should_redraw {
-                state.invalidate_overlay_throttled();
-            }
+            state.invalidate_caches();
             UpdateOutcome::None
         }
-        Msg::PointerUp => {
+        Msg::PointerUp(_cp) => {
             // Always clear the cached down position, regardless of whether we commit.
             if state.pointer_down.take().is_none() {
                 return UpdateOutcome::None;
@@ -602,7 +495,7 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                 if let Some(r) = rect {
                     state.scene.set_crop(Some(r));
                 }
-                state.invalidate_overlay();
+                state.invalidate_caches();
                 return UpdateOutcome::None;
             }
             let drop = match state.scene.in_progress() {
@@ -622,7 +515,7 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
             } else {
                 state.scene.commit_in_progress();
             }
-            state.invalidate_overlay();
+            state.invalidate_caches();
             UpdateOutcome::None
         }
         Msg::TextEditChanged(t) => {
@@ -641,7 +534,7 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                         color: state.tools.color,
                     });
                     state.scene.commit_in_progress();
-                    state.invalidate_overlay();
+                    state.invalidate_caches();
                 }
             }
             UpdateOutcome::None
@@ -716,4 +609,316 @@ fn stepper<'a>(label: String, value: String, on_dec: Msg, on_inc: Msg) -> Elemen
     ])
     .spacing(4)
     .into()
+}
+
+// ============================================================================
+// Canvas Program: live preview of committed + in-progress + crop dim.
+// ============================================================================
+
+struct AnnotationProgram<'a> {
+    captured: &'a RgbaImage,
+    scene: &'a AnnotationScene,
+    committed_cache: &'a canvas::Cache,
+    overlay_cache: &'a canvas::Cache,
+}
+
+// Parameterized over `cosmic::Theme` so the resulting `Canvas` produces a
+// `cosmic::Element` (which is `Element<'_, M, cosmic::Theme, cosmic::Renderer>`).
+// The default `Program` theme is `iced::Theme`, which would produce an iced
+// Element that doesn't satisfy `cosmic::Element`'s trait bounds.
+impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut (),
+        event: &cosmic::iced::Event,
+        bounds: cosmic::iced::Rectangle,
+        cursor: cosmic::iced::mouse::Cursor,
+    ) -> Option<canvas::Action<Msg>> {
+        use cosmic::iced::mouse;
+        let pos = cursor.position_in(bounds)?;
+        let cp = Point { x: pos.x, y: pos.y };
+        match event {
+            cosmic::iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                Some(canvas::Action::publish(Msg::PointerDown(cp)).and_capture())
+            }
+            cosmic::iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                Some(canvas::Action::publish(Msg::PointerMove(cp)).and_capture())
+            }
+            cosmic::iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                Some(canvas::Action::publish(Msg::PointerUp(cp)).and_capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &cosmic::Renderer,
+        _theme: &cosmic::Theme,
+        bounds: cosmic::iced::Rectangle,
+        _cursor: cosmic::iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let committed = self
+            .committed_cache
+            .draw(renderer, bounds.size(), |frame| {
+                for ann in self.scene.iter_committed() {
+                    draw_annotation(frame, self.captured, ann);
+                }
+            });
+        let overlay = self
+            .overlay_cache
+            .draw(renderer, bounds.size(), |frame| {
+                if let Some(ann) = self.scene.in_progress() {
+                    draw_annotation(frame, self.captured, ann);
+                }
+                if let Some(crop) = self.scene.crop() {
+                    draw_crop_dim(frame, crop, bounds.size());
+                }
+            });
+        vec![committed, overlay]
+    }
+}
+
+// ============================================================================
+// Per-tool drawing: ports `render::render_one` from tiny-skia to canvas
+// primitives. Math is identical to the saved-file composite path; only the
+// API calls change. Sub-pixel anti-aliasing drift between the two renderers
+// is acceptable per spec.
+// ============================================================================
+
+fn ip(p: Point) -> cosmic::iced::Point {
+    cosmic::iced::Point::new(p.x, p.y)
+}
+
+fn isize_from(s: crate::annotation::model::Size) -> cosmic::iced::Size {
+    cosmic::iced::Size::new(s.w, s.h)
+}
+
+fn draw_annotation(frame: &mut canvas::Frame, captured: &RgbaImage, ann: &Annotation) {
+    use canvas::{LineCap, LineJoin, Path, Stroke as CStroke, Style};
+
+    match ann {
+        Annotation::Pen { points, stroke } => {
+            if points.len() < 2 {
+                return;
+            }
+            let path = Path::new(|b| {
+                b.move_to(ip(points[0]));
+                for p in &points[1..] {
+                    b.line_to(ip(*p));
+                }
+            });
+            frame.stroke(
+                &path,
+                CStroke {
+                    style: Style::Solid(stroke.color),
+                    width: stroke.width.max(0.5),
+                    line_cap: LineCap::Round,
+                    line_join: LineJoin::Round,
+                    ..CStroke::default()
+                },
+            );
+        }
+        Annotation::Line { from, to, stroke } => {
+            let path = Path::line(ip(*from), ip(*to));
+            frame.stroke(
+                &path,
+                CStroke {
+                    style: Style::Solid(stroke.color),
+                    width: stroke.width.max(0.5),
+                    line_cap: LineCap::Round,
+                    line_join: LineJoin::Round,
+                    ..CStroke::default()
+                },
+            );
+        }
+        Annotation::Arrow { from, to, stroke } => {
+            let dx = to.x - from.x;
+            let dy = to.y - from.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 0.5 {
+                return;
+            }
+            let head_len = (stroke.width * 4.0).max(8.0);
+            let head_w = (stroke.width * 3.0).max(6.0);
+            let ux = dx / len;
+            let uy = dy / len;
+            let bx = to.x - ux * head_len;
+            let by = to.y - uy * head_len;
+            let nx = -uy;
+            let ny = ux;
+            let p1 = (to.x, to.y);
+            let p2 = (bx + nx * head_w * 0.5, by + ny * head_w * 0.5);
+            let p3 = (bx - nx * head_w * 0.5, by - ny * head_w * 0.5);
+
+            // Shaft: stop at the base of the head so it doesn't poke through the tip.
+            let shaft = Path::line(ip(*from), cosmic::iced::Point::new(bx, by));
+            frame.stroke(
+                &shaft,
+                CStroke {
+                    style: Style::Solid(stroke.color),
+                    width: stroke.width.max(0.5),
+                    line_cap: LineCap::Round,
+                    line_join: LineJoin::Round,
+                    ..CStroke::default()
+                },
+            );
+
+            // Filled triangle head.
+            let head = Path::new(|b| {
+                b.move_to(cosmic::iced::Point::new(p1.0, p1.1));
+                b.line_to(cosmic::iced::Point::new(p2.0, p2.1));
+                b.line_to(cosmic::iced::Point::new(p3.0, p3.1));
+                b.close();
+            });
+            frame.fill(&head, stroke.color);
+        }
+        Annotation::Rectangle { rect, stroke } => {
+            if rect.is_degenerate() {
+                return;
+            }
+            let path = Path::rectangle(ip(rect.origin), isize_from(rect.size));
+            frame.stroke(
+                &path,
+                CStroke {
+                    style: Style::Solid(stroke.color),
+                    width: stroke.width.max(0.5),
+                    ..CStroke::default()
+                },
+            );
+        }
+        Annotation::Ellipse { rect, stroke } => {
+            if rect.is_degenerate() {
+                return;
+            }
+            let cx = rect.origin.x + rect.size.w / 2.0;
+            let cy = rect.origin.y + rect.size.h / 2.0;
+            let rx = rect.size.w / 2.0;
+            let ry = rect.size.h / 2.0;
+            let path = Path::new(|b| {
+                b.ellipse(canvas::path::arc::Elliptical {
+                    center: cosmic::iced::Point::new(cx, cy),
+                    radii: Vector::new(rx, ry),
+                    rotation: cosmic::iced::Radians(0.0),
+                    start_angle: cosmic::iced::Radians(0.0),
+                    end_angle: cosmic::iced::Radians(2.0 * std::f32::consts::PI),
+                });
+            });
+            frame.stroke(
+                &path,
+                CStroke {
+                    style: Style::Solid(stroke.color),
+                    width: stroke.width.max(0.5),
+                    ..CStroke::default()
+                },
+            );
+        }
+        Annotation::Text { position, content, font_size, color } => {
+            if content.is_empty() || *font_size <= 0.0 {
+                return;
+            }
+            frame.fill_text(canvas::Text {
+                content: content.clone(),
+                position: ip(*position),
+                color: *color,
+                size: Pixels(*font_size),
+                shaping: cosmic::iced_core::text::Shaping::Advanced,
+                ..canvas::Text::default()
+            });
+        }
+        Annotation::Pixelate { rect, tile_size } => {
+            draw_pixelate(frame, captured, rect, *tile_size);
+        }
+    }
+}
+
+fn draw_pixelate(
+    frame: &mut canvas::Frame,
+    captured: &RgbaImage,
+    rect: &LocalRect,
+    tile_size: u32,
+) {
+    if rect.is_degenerate() || tile_size == 0 {
+        return;
+    }
+    let tw = captured.width() as i32;
+    let th = captured.height() as i32;
+    let x0 = (rect.origin.x.round() as i32).max(0);
+    let y0 = (rect.origin.y.round() as i32).max(0);
+    let x1 = ((rect.origin.x + rect.size.w).round() as i32).min(tw);
+    let y1 = ((rect.origin.y + rect.size.h).round() as i32).min(th);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let ts = tile_size as i32;
+    let src = captured.as_raw();
+    let stride = captured.width() as i32 * 4;
+
+    let mut ty = y0;
+    while ty < y1 {
+        let mut tx = x0;
+        while tx < x1 {
+            let bx1 = (tx + ts).min(x1);
+            let by1 = (ty + ts).min(y1);
+            let mut r_acc: u64 = 0;
+            let mut g_acc: u64 = 0;
+            let mut b_acc: u64 = 0;
+            let mut a_acc: u64 = 0;
+            let mut count: u64 = 0;
+            for py in ty..by1 {
+                for px in tx..bx1 {
+                    let i = (py * stride + px * 4) as usize;
+                    r_acc += src[i] as u64;
+                    g_acc += src[i + 1] as u64;
+                    b_acc += src[i + 2] as u64;
+                    a_acc += src[i + 3] as u64;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                tx += ts;
+                continue;
+            }
+            let r = (r_acc / count) as u8;
+            let g = (g_acc / count) as u8;
+            let b = (b_acc / count) as u8;
+            let a = (a_acc / count) as u8;
+            let color = cosmic::iced::Color::from_rgba8(r, g, b, a as f32 / 255.0);
+            frame.fill_rectangle(
+                cosmic::iced::Point::new(tx as f32, ty as f32),
+                cosmic::iced::Size::new((bx1 - tx) as f32, (by1 - ty) as f32),
+                color,
+            );
+            tx += ts;
+        }
+        ty += ts;
+    }
+}
+
+/// Even-odd fill: outer canvas-sized rect + inner crop rect. The fill rule
+/// causes the interior of the crop to be excluded, leaving a dim frame around it.
+fn draw_crop_dim(
+    frame: &mut canvas::Frame,
+    crop: &LocalRect,
+    canvas_size: cosmic::iced::Size,
+) {
+    use canvas::{Fill, Path, Style, fill::Rule};
+
+    let path = Path::new(|b| {
+        b.rectangle(cosmic::iced::Point::new(0.0, 0.0), canvas_size);
+        b.rectangle(
+            ip(crop.origin),
+            cosmic::iced::Size::new(crop.size.w.max(0.0), crop.size.h.max(0.0)),
+        );
+    });
+    frame.fill(
+        &path,
+        Fill {
+            style: Style::Solid(cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 128.0 / 255.0)),
+            rule: Rule::EvenOdd,
+        },
+    );
 }
