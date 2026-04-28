@@ -4,7 +4,7 @@ use cosmic::Element;
 use cosmic::iced::Length;
 use cosmic::iced::widget::Stack;
 use cosmic::iced_core::Point as IcedPoint;
-use cosmic::widget::{button, column, container, mouse_area, row, space, text};
+use cosmic::widget::{button, column, container, icon, mouse_area, row, space, text};
 use image::RgbaImage;
 use tiny_skia::Pixmap;
 
@@ -122,21 +122,26 @@ pub enum Msg {
 pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
     let toolbar = build_toolbar(state);
 
+    // Render the canvas at the captured image's exact pixel size so widget
+    // coordinates equal canvas-local pixels (1:1 mapping, no scaling).
+    let img_w = Length::Fixed(state.captured.width() as f32);
+    let img_h = Length::Fixed(state.captured.height() as f32);
+
     let bg: Element<'_, Msg> = cosmic::widget::image(state.captured_handle.clone())
-        .width(Length::Fill)
-        .height(Length::Fill)
+        .width(img_w)
+        .height(img_h)
         .into();
     let overlay: Element<'_, Msg> = match &state.overlay_handle {
         Some(h) => cosmic::widget::image(h.clone())
-            .width(Length::Fill)
-            .height(Length::Fill)
+            .width(img_w)
+            .height(img_h)
             .into(),
-        None => space::horizontal().width(Length::Fill).into(),
+        None => space::horizontal().width(Length::Fixed(0.0)).into(),
     };
 
     let canvas_stack = Stack::with_children(vec![bg, overlay])
-        .width(Length::Fill)
-        .height(Length::Fill);
+        .width(img_w)
+        .height(img_h);
     let canvas_area = mouse_area(canvas_stack)
         .on_press(Msg::PointerDown)
         .on_move(Msg::PointerMove)
@@ -162,41 +167,107 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
         ])
         .into();
         Stack::with_children(vec![canvas_area.into(), positioned])
-            .width(Length::Fill)
-            .height(Length::Fill)
+            .width(img_w)
+            .height(img_h)
             .into()
     } else {
         canvas_area.into()
     };
 
-    column::with_children(vec![
-        toolbar,
-        container(canvas_element)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-    ])
+    column::with_children(vec![toolbar, canvas_element])
+        .into()
+}
+
+const TOOLBAR_ICON_SIZE: u16 = 18;
+
+fn icon_tool_btn<'a>(
+    state: &AnnotationView,
+    icon_name: &'static str,
+    label: String,
+    shortcut: &'static str,
+    tool: Tool,
+) -> Element<'a, Msg> {
+    let icon_widget = icon::Icon::from(icon::from_name(icon_name).size(TOOLBAR_ICON_SIZE));
+    let mut btn = button::custom(icon_widget).on_press(Msg::SelectTool(tool));
+    if state.tools.active_tool == tool {
+        btn = btn.class(cosmic::theme::Button::Suggested);
+    }
+    cosmic::widget::tooltip::tooltip(
+        btn,
+        text(format!("{label} ({shortcut})")),
+        cosmic::widget::tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+fn icon_action_btn<'a>(
+    icon_name: &'static str,
+    label: String,
+    shortcut: &'static str,
+    on_press: Msg,
+) -> Element<'a, Msg> {
+    let icon_widget = icon::Icon::from(icon::from_name(icon_name).size(TOOLBAR_ICON_SIZE));
+    let btn = button::custom(icon_widget).on_press(on_press);
+    cosmic::widget::tooltip::tooltip(
+        btn,
+        text(format!("{label} ({shortcut})")),
+        cosmic::widget::tooltip::Position::Bottom,
+    )
     .into()
 }
 
 fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
-    let tool_btn = |label: String, t: Tool| -> Element<'a, Msg> {
-        let mut b = button::standard(label).on_press(Msg::SelectTool(t));
-        if state.tools.active_tool == t {
-            b = b.class(cosmic::theme::Button::Suggested);
-        }
-        b.into()
-    };
-
     let tools = row::with_children(vec![
-        tool_btn(fl!("tool-pen"), Tool::Pen),
-        tool_btn(fl!("tool-line"), Tool::Line),
-        tool_btn(fl!("tool-arrow"), Tool::Arrow),
-        tool_btn(fl!("tool-rectangle"), Tool::Rectangle),
-        tool_btn(fl!("tool-ellipse"), Tool::Ellipse),
-        tool_btn(fl!("tool-text"), Tool::Text),
-        tool_btn(fl!("tool-pixelate"), Tool::Pixelate),
-        tool_btn(fl!("tool-crop"), Tool::Crop),
+        icon_tool_btn(state, "pencil-symbolic", fl!("tool-pen"), "P", Tool::Pen),
+        icon_tool_btn(
+            state,
+            "insert-line-symbolic",
+            fl!("tool-line"),
+            "L",
+            Tool::Line,
+        ),
+        icon_tool_btn(
+            state,
+            "insert-arrow-symbolic",
+            fl!("tool-arrow"),
+            "A",
+            Tool::Arrow,
+        ),
+        icon_tool_btn(
+            state,
+            "insert-rectangle-symbolic",
+            fl!("tool-rectangle"),
+            "R",
+            Tool::Rectangle,
+        ),
+        icon_tool_btn(
+            state,
+            "insert-ellipse-symbolic",
+            fl!("tool-ellipse"),
+            "E",
+            Tool::Ellipse,
+        ),
+        icon_tool_btn(
+            state,
+            "insert-text-symbolic",
+            fl!("tool-text"),
+            "T",
+            Tool::Text,
+        ),
+        icon_tool_btn(
+            state,
+            "image-red-eye-symbolic",
+            fl!("tool-pixelate"),
+            "B",
+            Tool::Pixelate,
+        ),
+        icon_tool_btn(
+            state,
+            "image-crop-rotate-symbolic",
+            fl!("tool-crop"),
+            "C",
+            Tool::Crop,
+        ),
     ])
     .spacing(4);
 
@@ -233,15 +304,24 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
     };
 
     let history_and_exit = row::with_children(vec![
-        button::standard(fl!("annotate-undo"))
-            .on_press(Msg::Undo)
-            .into(),
-        button::standard(fl!("annotate-redo"))
-            .on_press(Msg::Redo)
-            .into(),
-        button::standard(fl!("annotate-cancel"))
-            .on_press(Msg::Cancel)
-            .into(),
+        icon_action_btn(
+            "edit-undo-symbolic",
+            fl!("annotate-undo"),
+            "Ctrl+Z",
+            Msg::Undo,
+        ),
+        icon_action_btn(
+            "edit-redo-symbolic",
+            fl!("annotate-redo"),
+            "Ctrl+Shift+Z",
+            Msg::Redo,
+        ),
+        icon_action_btn(
+            "window-close-symbolic",
+            fl!("annotate-cancel"),
+            "Esc",
+            Msg::Cancel,
+        ),
         button::suggested(fl!("annotate-done"))
             .on_press(Msg::Done)
             .into(),

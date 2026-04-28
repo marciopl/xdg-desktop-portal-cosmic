@@ -923,8 +923,14 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                 .iter()
                 .map(|o| destroy_layer_surface(o.id))
                 .collect();
+            // Surface size = max(captured image, toolbar minimum) horizontally,
+            // captured + toolbar height vertically. The minimum width keeps the iconified
+            // toolbar legible even when capturing very small regions.
+            const TOOLBAR_H: u32 = 130;
+            const TOOLBAR_MIN_W: u32 = 720;
+            let surface_w = captured.width().max(TOOLBAR_MIN_W);
+            let surface_h = captured.height().saturating_add(TOOLBAR_H);
             portal.annotation_view = Some(crate::annotation::AnnotationView::new(captured));
-            // Get a fresh layer surface on the primary output for the annotation UI.
             let primary = portal.outputs.first().cloned();
             if let Some(o) = primary {
                 cmds.push(get_layer_surface(SctkLayerSurfaceSettings {
@@ -932,10 +938,10 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                     layer: Layer::Overlay,
                     keyboard_interactivity: KeyboardInteractivity::Exclusive,
                     input_zone: None,
-                    anchor: Anchor::all(),
+                    anchor: Anchor::empty(),
                     output: IcedOutput::Output(o.output.clone()),
                     namespace: "screenshot-annotate".to_string(),
-                    size: Some((None, None)),
+                    size: Some((Some(surface_w), Some(surface_h))),
                     exclusive_zone: -1,
                     size_limits: Limits::NONE.min_height(1.0).min_width(1.0),
                     ..Default::default()
