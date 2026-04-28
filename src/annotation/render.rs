@@ -83,7 +83,7 @@ fn render_crop_dim(target: &mut Pixmap, crop: &LocalRect) {
     target.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
 }
 
-fn render_one(target: &mut Pixmap, _source: &Pixmap, ann: &crate::annotation::model::Annotation) {
+fn render_one(target: &mut Pixmap, source: &Pixmap, ann: &crate::annotation::model::Annotation) {
     use tiny_skia::{PathBuilder, Stroke as TsStroke, Transform};
     use crate::annotation::model::Annotation;
 
@@ -181,8 +181,8 @@ fn render_one(target: &mut Pixmap, _source: &Pixmap, ann: &crate::annotation::mo
             let y1 = ((rect.origin.y + rect.size.h).round() as i32).min(th);
             if x1 <= x0 || y1 <= y0 { return; }
             let ts = *tile_size as i32;
-            let src_data = _source.data();
-            let src_stride = _source.width() as i32 * 4;
+            let src_data = source.data();
+            let src_stride = source.width() as i32 * 4;
 
             let mut ty = y0;
             while ty < y1 {
@@ -263,7 +263,6 @@ fn render_one(target: &mut Pixmap, _source: &Pixmap, ann: &crate::annotation::mo
                 });
             });
         }
-        _ => {}
     }
 }
 
@@ -276,12 +275,15 @@ fn make_paint(color: cosmic::iced::Color) -> tiny_skia::Paint<'static> {
 }
 
 /// Apply scene.crop() to an RgbaImage. No-op if crop is None or degenerate.
+// Casts: f32 origin/size values are clamped to non-negative finite ranges
+// (and bounded by image extents below) before the as-cast to u32.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn apply_crop(img: RgbaImage, crop: Option<&LocalRect>) -> RgbaImage {
     let Some(r) = crop else { return img };
     let x = r.origin.x.round().max(0.0) as u32;
     let y = r.origin.y.round().max(0.0) as u32;
-    let w = (r.size.w.round() as u32).min(img.width().saturating_sub(x));
-    let h = (r.size.h.round() as u32).min(img.height().saturating_sub(y));
+    let w = (r.size.w.round().max(0.0) as u32).min(img.width().saturating_sub(x));
+    let h = (r.size.h.round().max(0.0) as u32).min(img.height().saturating_sub(y));
     if w == 0 || h == 0 { return img; }
     image::imageops::crop_imm(&img, x, y, w, h).to_image()
 }

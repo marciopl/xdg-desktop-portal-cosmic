@@ -71,6 +71,11 @@ pub enum Msg {
     FileChooser(window::Id, file_chooser::Msg),
     Screenshot(screenshot::Msg),
     Screencast(screencast_dialog::Msg),
+    /// Direct annotation dispatch path. Currently unused (annotation messages
+    /// flow via `Msg::Screenshot(screenshot::Msg::AnnotationInner)`), but kept
+    /// for future flows that route annotation events outside the screenshot
+    /// state machine.
+    #[allow(dead_code)]
     Annotation(crate::annotation::WidgetMsg),
     Portal(subscription::Event),
     Output(OutputEvent, WlOutput),

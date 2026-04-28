@@ -727,12 +727,12 @@ pub(crate) fn view(portal: &CosmicPortal, id: window::Id) -> cosmic::Element<'_,
 pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::app::Msg> {
     match msg {
         Msg::Capture => {
-            let mut cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
+            let cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
                 .outputs
                 .iter()
                 .map(|o| destroy_layer_surface(o.id))
                 .collect();
-            let Some(args) = portal.screenshot_args.as_ref().cloned() else {
+            let Some(args) = portal.screenshot_args.clone() else {
                 log::error!("Failed to find screenshot Args for Capture message.");
                 return cosmic::Task::batch(cmds);
             };
@@ -746,20 +746,17 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                 ..
             } = args;
 
-            let mut success = true;
-            let image_path = Screenshot::get_img_path(location);
+            let _ = Screenshot::get_img_path(location);
 
             match choice {
                 Choice::Output(name) => {
                     if let Some(img) = images.remove(&name) {
                         return cosmic::task::message(crate::app::Msg::Screenshot(Msg::AnnotateStart(img.rgba)));
-                    } else {
-                        log::error!("Failed to find output {}", name);
-                        success = false;
                     }
+                    log::error!("Failed to find output {}", name);
                 }
-                Choice::Rectangle(r, s) => {
-                    if let Some(RectDimension { width, height }) = r.dimensions() {
+                Choice::Rectangle(r, _) => {
+                    if let Some(RectDimension { .. }) = r.dimensions() {
                         let frames = images
                             .into_iter()
                             .filter_map(|(name, raw_img)| {
@@ -782,8 +779,6 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                         return cosmic::task::message(crate::app::Msg::Screenshot(
                             Msg::AnnotateStart(img),
                         ));
-                    } else {
-                        success = false;
                     }
                 }
                 Choice::Window(output, Some(window_i)) => {
@@ -793,26 +788,13 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
                         .cloned()
                     {
                         return cosmic::task::message(crate::app::Msg::Screenshot(Msg::AnnotateStart(img.rgba)));
-                    } else {
-                        success = false;
                     }
                 }
-                _ => {
-                    success = false;
-                }
+                _ => {}
             }
 
-            let response = if success && image_path.is_some() {
-                PortalResponse::Success(ScreenshotResult {
-                    uri: format!("file:///{}", image_path.unwrap().display()),
-                })
-            } else if success && image_path.is_none() {
-                PortalResponse::Success(ScreenshotResult {
-                    uri: "clipboard:///".to_string(),
-                })
-            } else {
-                PortalResponse::Other
-            };
+            // None of the success paths above returned — emit a failure response.
+            let response = PortalResponse::Other;
 
             tokio::spawn(async move {
                 if let Err(err) = tx.send(response).await {
@@ -997,14 +979,12 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
             }) {
                 cmds.push(clipboard::write_data(ScreenshotBytes::new(buffer)));
             }
-            let response = if success && path.is_some() {
-                PortalResponse::Success(ScreenshotResult {
-                    uri: format!("file:///{}", path.unwrap().display()),
-                })
-            } else if success {
-                PortalResponse::Success(ScreenshotResult {
-                    uri: "clipboard:///".into(),
-                })
+            let response = if success {
+                let uri = match path.as_deref() {
+                    Some(p) => format!("file:///{}", p.display()),
+                    None => "clipboard:///".into(),
+                };
+                PortalResponse::Success(ScreenshotResult { uri })
             } else {
                 PortalResponse::Other
             };

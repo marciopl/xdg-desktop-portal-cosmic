@@ -463,13 +463,14 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
                 return UpdateOutcome::None;
             }
             let drop = match state.scene.in_progress() {
-                Some(Annotation::Rectangle { rect, .. })
-                | Some(Annotation::Ellipse { rect, .. })
-                | Some(Annotation::Pixelate { rect, .. }) => rect.is_degenerate(),
-                Some(Annotation::Line { from, to, .. })
-                | Some(Annotation::Arrow { from, to, .. }) => {
-                    (from.x - to.x).abs() < 0.5 && (from.y - to.y).abs() < 0.5
-                }
+                Some(
+                    Annotation::Rectangle { rect, .. }
+                    | Annotation::Ellipse { rect, .. }
+                    | Annotation::Pixelate { rect, .. },
+                ) => rect.is_degenerate(),
+                Some(
+                    Annotation::Line { from, to, .. } | Annotation::Arrow { from, to, .. },
+                ) => (from.x - to.x).abs() < 0.5 && (from.y - to.y).abs() < 0.5,
                 Some(Annotation::Pen { points, .. }) => points.len() < 2,
                 _ => false,
             };
