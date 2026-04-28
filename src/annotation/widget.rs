@@ -301,7 +301,7 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
     ])
     .spacing(8);
 
-    column::with_children(vec![
+    let inner = column::with_children(vec![
         tools.into(),
         row::with_children(vec![
             palette_row.into(),
@@ -314,8 +314,21 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
         .into(),
     ])
     .spacing(8)
-    .padding(8)
-    .into()
+    .padding(8);
+
+    // Translucent backdrop so the toolbar stays legible over light captures.
+    container(inner)
+        .class(cosmic::theme::Container::Custom(Box::new(|theme| {
+            let palette = theme.cosmic();
+            let mut bg: cosmic::iced::Color = palette.background.component.base.into();
+            bg.a = 0.85;
+            cosmic::iced::widget::container::Style {
+                background: Some(cosmic::iced::Background::Color(bg)),
+                text_color: Some(palette.background.component.on.into()),
+                ..Default::default()
+            }
+        })))
+        .into()
 }
 
 pub enum UpdateOutcome {
