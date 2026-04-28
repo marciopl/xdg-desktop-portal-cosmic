@@ -4,12 +4,12 @@ use cosmic::Element;
 use cosmic::iced::Length;
 use cosmic::iced::widget::Stack;
 use cosmic::iced_core::Point as IcedPoint;
-use cosmic::widget::{button, column, container, mouse_area, row, space};
+use cosmic::widget::{button, column, container, mouse_area, row, space, text};
 use image::RgbaImage;
 use tiny_skia::Pixmap;
 
 use crate::annotation::model::{
-    Annotation, AnnotationScene, LocalRect, Point, Size, Stroke, Tool, ToolState,
+    Annotation, AnnotationScene, Color, LocalRect, Point, Size, Stroke, Tool, ToolState,
 };
 use crate::annotation::render::{pixmap_from_rgba, render_annotations, rgba_from_pixmap};
 use crate::fl;
@@ -113,6 +113,10 @@ pub enum Msg {
     TextEditChanged(String),
     TextEditSubmit,
     TextEditCancel,
+    SetColor(Color),
+    SetStrokeWidth(f32),
+    SetTextSize(f32),
+    SetTileSize(u32),
 }
 
 pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
@@ -184,7 +188,7 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
         b.into()
     };
 
-    let mut children: Vec<Element<'_, Msg>> = vec![
+    let tools = row::with_children(vec![
         tool_btn(fl!("tool-pen"), Tool::Pen),
         tool_btn(fl!("tool-line"), Tool::Line),
         tool_btn(fl!("tool-arrow"), Tool::Arrow),
@@ -193,24 +197,72 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
         tool_btn(fl!("tool-text"), Tool::Text),
         tool_btn(fl!("tool-pixelate"), Tool::Pixelate),
         tool_btn(fl!("tool-crop"), Tool::Crop),
-    ];
-    if state.tools.active_tool == Tool::Crop {
-        children.push(
-            button::standard(fl!("annotate-reset-crop"))
-                .on_press(Msg::ResetCrop)
-                .into(),
-        );
-    }
-    children.push(space::horizontal().width(Length::Fill).into());
-    children.push(button::standard(fl!("annotate-undo")).on_press(Msg::Undo).into());
-    children.push(button::standard(fl!("annotate-redo")).on_press(Msg::Redo).into());
-    children.push(button::standard(fl!("annotate-cancel")).on_press(Msg::Cancel).into());
-    children.push(button::suggested(fl!("annotate-done")).on_press(Msg::Done).into());
+    ])
+    .spacing(4);
 
-    row::with_children(children)
-        .spacing(8)
-        .padding(8)
-        .into()
+    let palette: Vec<Element<'_, Msg>> = PALETTE
+        .iter()
+        .map(|c| color_swatch(*c, color_eq(*c, state.tools.color)))
+        .collect();
+    let palette_row = row::with_children(palette).spacing(4);
+
+    let stroke = stepper(
+        fl!("stroke-width"),
+        format!("{:.0}", state.tools.stroke_width),
+        Msg::SetStrokeWidth(state.tools.stroke_width - 1.0),
+        Msg::SetStrokeWidth(state.tools.stroke_width + 1.0),
+    );
+
+    let tool_specific: Element<'_, Msg> = match state.tools.active_tool {
+        Tool::Text => stepper(
+            fl!("text-size"),
+            format!("{:.0}", state.tools.text_size),
+            Msg::SetTextSize(state.tools.text_size - 2.0),
+            Msg::SetTextSize(state.tools.text_size + 2.0),
+        ),
+        Tool::Pixelate => stepper(
+            fl!("tile-size"),
+            format!("{}", state.tools.tile_size),
+            Msg::SetTileSize(state.tools.tile_size.saturating_sub(2)),
+            Msg::SetTileSize(state.tools.tile_size + 2),
+        ),
+        Tool::Crop => button::standard(fl!("annotate-reset-crop"))
+            .on_press(Msg::ResetCrop)
+            .into(),
+        _ => space::horizontal().width(Length::Fixed(0.0)).into(),
+    };
+
+    let history_and_exit = row::with_children(vec![
+        button::standard(fl!("annotate-undo"))
+            .on_press(Msg::Undo)
+            .into(),
+        button::standard(fl!("annotate-redo"))
+            .on_press(Msg::Redo)
+            .into(),
+        button::standard(fl!("annotate-cancel"))
+            .on_press(Msg::Cancel)
+            .into(),
+        button::suggested(fl!("annotate-done"))
+            .on_press(Msg::Done)
+            .into(),
+    ])
+    .spacing(8);
+
+    column::with_children(vec![
+        tools.into(),
+        row::with_children(vec![
+            palette_row.into(),
+            stroke,
+            tool_specific,
+            space::horizontal().width(Length::Fill).into(),
+            history_and_exit.into(),
+        ])
+        .spacing(16)
+        .into(),
+    ])
+    .spacing(8)
+    .padding(8)
+    .into()
 }
 
 pub enum UpdateOutcome {
@@ -454,5 +506,70 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
             state.text_edit = None;
             UpdateOutcome::None
         }
+        Msg::SetColor(c) => {
+            state.tools.color = c;
+            UpdateOutcome::None
+        }
+        Msg::SetStrokeWidth(w) => {
+            state.tools.stroke_width = w.clamp(1.0, 32.0);
+            UpdateOutcome::None
+        }
+        Msg::SetTextSize(s) => {
+            state.tools.text_size = s.max(6.0);
+            UpdateOutcome::None
+        }
+        Msg::SetTileSize(t) => {
+            state.tools.tile_size = t.max(4);
+            UpdateOutcome::None
+        }
     }
+}
+
+const PALETTE: &[Color] = &[
+    Color::from_rgb(1.0, 0.0, 0.0),  // red
+    Color::from_rgb(1.0, 0.5, 0.0),  // orange
+    Color::from_rgb(1.0, 1.0, 0.0),  // yellow
+    Color::from_rgb(0.0, 0.7, 0.0),  // green
+    Color::from_rgb(0.0, 0.4, 1.0),  // blue
+    Color::from_rgb(0.6, 0.0, 0.8),  // purple
+    Color::from_rgb(0.0, 0.0, 0.0),  // black
+    Color::from_rgb(1.0, 1.0, 1.0),  // white
+];
+
+fn color_eq(a: Color, b: Color) -> bool {
+    (a.r - b.r).abs() < 1e-3
+        && (a.g - b.g).abs() < 1e-3
+        && (a.b - b.b).abs() < 1e-3
+        && (a.a - b.a).abs() < 1e-3
+}
+
+fn color_swatch<'a>(c: Color, active: bool) -> Element<'a, Msg> {
+    let bg = cosmic::iced_core::Background::Color(c);
+    let border_w: f32 = if active { 2.0 } else { 1.0 };
+    let inner = container(space::horizontal())
+        .width(Length::Fixed(20.0))
+        .height(Length::Fixed(20.0))
+        .class(cosmic::theme::Container::Custom(Box::new(move |_theme| {
+            cosmic::iced::widget::container::Style {
+                background: Some(bg),
+                border: cosmic::iced_core::Border {
+                    width: border_w,
+                    color: Color::from_rgb(0.5, 0.5, 0.5),
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }
+        })));
+    button::custom(inner).on_press(Msg::SetColor(c)).into()
+}
+
+fn stepper<'a>(label: String, value: String, on_dec: Msg, on_inc: Msg) -> Element<'a, Msg> {
+    row::with_children(vec![
+        text(label).into(),
+        button::standard("-").on_press(on_dec).into(),
+        text(value).into(),
+        button::standard("+").on_press(on_inc).into(),
+    ])
+    .spacing(4)
+    .into()
 }

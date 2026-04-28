@@ -589,9 +589,80 @@ impl Screenshot {
 
 pub(crate) fn view(portal: &CosmicPortal, id: window::Id) -> cosmic::Element<'_, Msg> {
     if let Some(av) = portal.annotation_view.as_ref() {
-        // Show the annotation widget. It captures pointer events directly via mouse_area;
-        // keyboard shortcut wiring (KeyboardWrapper) is added in Task 17.
-        return crate::annotation::widget::view(av).map(Msg::AnnotationInner);
+        let in_text_edit = av.text_edit.is_some();
+        let crop_active = av.tools.active_tool == crate::annotation::Tool::Crop;
+        return KeyboardWrapper::new(
+            crate::annotation::widget::view(av).map(Msg::AnnotationInner),
+            move |key, modifiers| {
+                if modifiers.control() {
+                    if let Key::Character(s) = &key {
+                        let lower = s.to_lowercase();
+                        match lower.as_str() {
+                            "z" if modifiers.shift() => {
+                                return Some(Msg::AnnotationInner(
+                                    crate::annotation::WidgetMsg::Redo,
+                                ));
+                            }
+                            "z" => {
+                                return Some(Msg::AnnotationInner(
+                                    crate::annotation::WidgetMsg::Undo,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                match &key {
+                    Key::Named(Named::Enter) => {
+                        // While text-edit is focused, Enter goes to the input (handled by
+                        // text_input itself, which emits TextEditSubmit). We swallow here to
+                        // avoid double-handling.
+                        if in_text_edit {
+                            return None;
+                        }
+                        return Some(Msg::AnnotationInner(crate::annotation::WidgetMsg::Done));
+                    }
+                    Key::Named(Named::Escape) => {
+                        if in_text_edit {
+                            return Some(Msg::AnnotationInner(
+                                crate::annotation::WidgetMsg::TextEditCancel,
+                            ));
+                        }
+                        return Some(Msg::AnnotationInner(crate::annotation::WidgetMsg::Cancel));
+                    }
+                    Key::Named(Named::Backspace) if crop_active && !in_text_edit => {
+                        return Some(Msg::AnnotationInner(
+                            crate::annotation::WidgetMsg::ResetCrop,
+                        ));
+                    }
+                    _ => {}
+                }
+                if in_text_edit {
+                    return None;
+                }
+                if let Key::Character(s) = &key {
+                    let upper = s.to_uppercase();
+                    let tool = match upper.as_str() {
+                        "P" => Some(crate::annotation::Tool::Pen),
+                        "L" => Some(crate::annotation::Tool::Line),
+                        "A" => Some(crate::annotation::Tool::Arrow),
+                        "R" => Some(crate::annotation::Tool::Rectangle),
+                        "E" => Some(crate::annotation::Tool::Ellipse),
+                        "T" => Some(crate::annotation::Tool::Text),
+                        "B" => Some(crate::annotation::Tool::Pixelate),
+                        "C" => Some(crate::annotation::Tool::Crop),
+                        _ => None,
+                    };
+                    if let Some(t) = tool {
+                        return Some(Msg::AnnotationInner(
+                            crate::annotation::WidgetMsg::SelectTool(t),
+                        ));
+                    }
+                }
+                None
+            },
+        )
+        .into();
     }
     let Some((i, output)) = portal.outputs.iter().enumerate().find(|(i, o)| o.id == id) else {
         return space::horizontal().width(Length::Fixed(1.0)).into();
