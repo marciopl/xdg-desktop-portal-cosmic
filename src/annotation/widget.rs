@@ -12,6 +12,10 @@ use crate::annotation::model::{
 };
 use crate::fl;
 
+const MIN_ZOOM: f32 = 0.25;
+const MAX_ZOOM: f32 = 4.0;
+const ZOOM_STEP: f32 = 1.25;
+
 pub struct TextEditState {
     pub position: Point,
     pub text: String,
@@ -35,6 +39,7 @@ pub struct AnnotationView {
     pointer_down: Option<Point>,
     /// Pending text edit: position (canvas-local), current text buffer, focus id.
     pub text_edit: Option<TextEditState>,
+    pub zoom: f32,
 }
 
 impl AnnotationView {
@@ -54,6 +59,7 @@ impl AnnotationView {
             committed_version_cached: 0,
             pointer_down: None,
             text_edit: None,
+            zoom: 1.0,
         }
     }
 
@@ -69,6 +75,31 @@ impl AnnotationView {
             self.committed_version_cached = scene_version;
         }
         self.overlay_cache.clear();
+    }
+
+    pub fn set_zoom(&mut self, z: f32) {
+        let clamped = z.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (clamped - self.zoom).abs() > f32::EPSILON {
+            self.zoom = clamped;
+            // Geometry caches are zoom-dependent (we apply frame.scale(zoom) inside
+            // draw), so they must be cleared. invalidate_caches() also recomputes
+            // the committed_version snapshot — the version hasn't changed here, so
+            // we just clear both caches directly.
+            self.committed_cache.clear();
+            self.overlay_cache.clear();
+        }
+    }
+
+    pub fn zoom_in(&mut self) {
+        self.set_zoom(self.zoom * ZOOM_STEP);
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.set_zoom(self.zoom / ZOOM_STEP);
+    }
+
+    pub fn zoom_reset(&mut self) {
+        self.set_zoom(1.0);
     }
 }
 
@@ -90,6 +121,10 @@ pub enum Msg {
     SetStrokeWidth(f32),
     SetTextSize(f32),
     SetTileSize(u32),
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    SetZoom(f32),
 }
 
 pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
@@ -572,6 +607,22 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
             state.tools.tile_size = t.max(4);
             UpdateOutcome::None
         }
+        Msg::ZoomIn => {
+            state.zoom_in();
+            UpdateOutcome::None
+        }
+        Msg::ZoomOut => {
+            state.zoom_out();
+            UpdateOutcome::None
+        }
+        Msg::ZoomReset => {
+            state.zoom_reset();
+            UpdateOutcome::None
+        }
+        Msg::SetZoom(z) => {
+            state.set_zoom(z);
+            UpdateOutcome::None
+        }
     }
 }
 
@@ -934,4 +985,36 @@ fn draw_crop_dim(
             rule: Rule::EvenOdd,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::RgbaImage;
+
+    #[test]
+    fn zoom_clamps_to_min_and_max() {
+        let mut view = AnnotationView::new(RgbaImage::new(10, 10));
+        view.set_zoom(0.0);
+        assert!((view.zoom - MIN_ZOOM).abs() < 1e-6);
+        view.set_zoom(100.0);
+        assert!((view.zoom - MAX_ZOOM).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zoom_in_out_round_trips_within_tolerance() {
+        let mut view = AnnotationView::new(RgbaImage::new(10, 10));
+        view.zoom_in();
+        let after_in = view.zoom;
+        view.zoom_out();
+        assert!((view.zoom - 1.0).abs() < 1e-3, "round trip from 1.0 -> {after_in} -> {}", view.zoom);
+    }
+
+    #[test]
+    fn zoom_reset_returns_to_one() {
+        let mut view = AnnotationView::new(RgbaImage::new(10, 10));
+        view.set_zoom(2.5);
+        view.zoom_reset();
+        assert!((view.zoom - 1.0).abs() < f32::EPSILON);
+    }
 }
