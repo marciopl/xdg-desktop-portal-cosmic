@@ -2,6 +2,7 @@
 
 use cosmic::Element;
 use cosmic::iced::widget::Stack;
+use cosmic::iced::widget::scrollable::{Direction, Scrollbar};
 use cosmic::iced::{Length, Pixels, Vector};
 use cosmic::iced::widget::canvas;
 use cosmic::widget::{button, column, container, icon, row, space, text};
@@ -188,6 +189,10 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
 
     // Wrap the canvas in a scrollable so users can pan when zoomed past the window.
     let scrollable_canvas: Element<'_, Msg> = cosmic::widget::scrollable(canvas_element)
+        .direction(Direction::Both {
+            vertical: Scrollbar::default(),
+            horizontal: Scrollbar::default(),
+        })
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
