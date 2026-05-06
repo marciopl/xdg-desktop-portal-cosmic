@@ -245,11 +245,10 @@ fn render_one(target: &mut Pixmap, source: &Pixmap, ann: &crate::annotation::mod
                     let metrics = Metrics::new(*font_size, *font_size * 1.2);
                     let mut buffer = Buffer::new(&mut fs, metrics);
                     buffer.set_size(
-                        &mut fs,
                         Some(target.width() as f32 - position.x),
                         Some(target.height() as f32 - position.y),
                     );
-                    buffer.set_text(&mut fs, content, &Attrs::new(), Shaping::Advanced, None);
+                    buffer.set_text(content, &Attrs::new(), Shaping::Advanced, None);
                     buffer.shape_until_scroll(&mut fs, false);
 
                     let [r, g, b, a] = color.into_rgba8();

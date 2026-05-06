@@ -2,35 +2,37 @@
 
 use cosmic::cosmic_config::CosmicConfigEntry;
 use cosmic::iced::clipboard::mime::AsMimeTypes;
-use cosmic::iced::keyboard::{Key, key::Named};
-use cosmic::iced::{Limits, window};
-use cosmic::iced_core::Length;
-use cosmic::iced_runtime::clipboard;
-use cosmic::iced_runtime::platform_specific::wayland::layer_surface::{
+use cosmic::iced::keyboard::Key;
+use cosmic::iced::keyboard::key::Named;
+use cosmic::iced::platform_specific::shell::commands::layer_surface::{
+    destroy_layer_surface, get_layer_surface,
+};
+use cosmic::iced::runtime::clipboard;
+use cosmic::iced::runtime::platform_specific::wayland::layer_surface::{
     IcedOutput, SctkLayerSurfaceSettings,
 };
-use cosmic::iced_winit::commands::layer_surface::{destroy_layer_surface, get_layer_surface};
+use cosmic::iced::{Length, Limits, window};
 use cosmic::widget::space;
 use cosmic_client_toolkit::sctk::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer};
 use futures::stream::{FuturesUnordered, StreamExt};
 use image::RgbaImage;
 use rustix::fd::AsFd;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::io;
 use std::num::NonZeroU32;
-use std::{
-    collections::HashMap,
-    io,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
 
 use wayland_client::protocol::wl_output::WlOutput;
 use zbus::zvariant;
 
 use crate::app::{CosmicPortal, OutputState};
-use crate::config::{self, screenshot::ImageSaveLocation};
+use crate::config::screenshot::ImageSaveLocation;
+use crate::config::{self};
 use crate::wayland::{CaptureSource, ShmImage, WaylandHelper};
-use crate::widget::{keyboard_wrapper::KeyboardWrapper, rectangle_selection::DragState};
+use crate::widget::keyboard_wrapper::KeyboardWrapper;
+use crate::widget::rectangle_selection::DragState;
 use crate::{PortalResponse, fl, subscription};
 
 #[derive(Clone, Debug)]
@@ -258,8 +260,8 @@ impl Screenshot {
             return None;
         }
 
-        let name = chrono::Local::now()
-            .format("Screenshot_%Y-%m-%d_%H-%M-%S.png")
+        let name = jiff::Zoned::now()
+            .strftime("Screenshot_%Y-%m-%d_%H-%M-%S.png")
             .to_string();
         path.push(name);
 

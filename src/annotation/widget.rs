@@ -812,7 +812,7 @@ fn color_eq(a: Color, b: Color) -> bool {
 }
 
 fn color_swatch<'a>(c: Color, active: bool) -> Element<'a, Msg> {
-    let bg = cosmic::iced_core::Background::Color(c);
+    let bg = cosmic::iced::core::Background::Color(c);
     let border_w: f32 = if active { 2.0 } else { 1.0 };
     let inner = container(space::horizontal())
         .width(Length::Fixed(20.0))
@@ -820,7 +820,7 @@ fn color_swatch<'a>(c: Color, active: bool) -> Element<'a, Msg> {
         .class(cosmic::theme::Container::Custom(Box::new(move |_theme| {
             cosmic::iced::widget::container::Style {
                 background: Some(bg),
-                border: cosmic::iced_core::Border {
+                border: cosmic::iced::core::Border {
                     width: border_w,
                     color: Color::from_rgb(0.5, 0.5, 0.5),
                     radius: 4.0.into(),
@@ -1142,7 +1142,7 @@ fn draw_annotation(frame: &mut canvas::Frame, captured: &RgbaImage, ann: &Annota
                 position: ip(*position),
                 color: *color,
                 size: Pixels(*font_size),
-                shaping: cosmic::iced_core::text::Shaping::Advanced,
+                shaping: cosmic::iced::core::text::Shaping::Advanced,
                 ..canvas::Text::default()
             });
         }

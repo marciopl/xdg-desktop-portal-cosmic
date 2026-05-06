@@ -2,19 +2,18 @@ use crate::app::CosmicPortal;
 use crate::fl;
 use crate::wayland::{CaptureSource, WaylandHelper};
 use crate::widget::keyboard_wrapper::KeyboardWrapper;
-use ashpd::{desktop::screencast::SourceType, enumflags2::BitFlags};
+use ashpd::desktop::screencast::SourceType;
+use ashpd::enumflags2::BitFlags;
 use cosmic::desktop::IconSourceExt;
-use cosmic::iced::{
-    self,
-    keyboard::{Key, key::Named},
-    window,
-};
+use cosmic::iced::keyboard::Key;
+use cosmic::iced::keyboard::key::Named;
+use cosmic::iced::{self, window};
 use fde::IconSource;
 
-use cosmic::iced_runtime::platform_specific::wayland::layer_surface::SctkLayerSurfaceSettings;
-use cosmic::iced_winit::commands::layer_surface::{
+use cosmic::iced::platform_specific::shell::commands::layer_surface::{
     KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface,
 };
+use cosmic::iced::runtime::platform_specific::wayland::layer_surface::SctkLayerSurfaceSettings;
 use cosmic::widget::autosize;
 use cosmic::{theme, widget};
 use cosmic_client_toolkit::sctk::output::OutputInfo;
@@ -319,7 +318,7 @@ fn output_button<'a>(
 ) -> cosmic::Element<'a, Msg> {
     let text = widget::text(label).class(theme::style::Text::Custom(|theme| {
         let container = theme.current_container();
-        cosmic::iced_core::widget::text::Style {
+        iced::core::widget::text::Style {
             color: Some(container.on.into()),
         }
     }));
@@ -364,7 +363,7 @@ fn toplevel_button(
 ) -> cosmic::Element<'_, Msg> {
     let text = widget::text(label).class(theme::style::Text::Custom(|theme| {
         let container = theme.current_container();
-        cosmic::iced_core::widget::text::Style {
+        iced::core::widget::text::Style {
             color: Some(container.on.into()),
         }
     }));
