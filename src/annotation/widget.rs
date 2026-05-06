@@ -729,7 +729,24 @@ struct AnnotationProgram<'a> {
 #[derive(Default)]
 struct ProgramState {
     modifiers: cosmic::iced::keyboard::Modifiers,
+    /// Accumulated wheel delta since the last zoom step. Lines are in "notches"
+    /// (1.0 ≈ one wheel detent), Pixels are in raw scroll pixels (~120 per
+    /// notch on most platforms). Once the magnitude crosses the threshold for
+    /// its kind we emit one ZoomIn/ZoomOut and subtract the consumed amount.
+    /// This stops high-resolution wheels and trackpads from firing many steps
+    /// per detent.
+    wheel_accum: f32,
+    /// Tracks whether the last wheel delta was Pixels (true) or Lines (false)
+    /// so the threshold matches the source units. Trackpad pixel events are
+    /// ~120/notch; line events are 1/notch.
+    wheel_is_pixels: bool,
 }
+
+/// One wheel-line ("notch") triggers one zoom step.
+const WHEEL_LINE_STEP: f32 = 1.0;
+/// Pixel scroll threshold per zoom step, matching the standard 120 pixels per
+/// wheel notch convention used by libinput and most toolkits.
+const WHEEL_PIXEL_STEP: f32 = 120.0;
 
 // Parameterized over `cosmic::Theme` so the resulting `Canvas` produces a
 // `cosmic::Element` (which is `Element<'_, M, cosmic::Theme, cosmic::Renderer>`).
@@ -753,6 +770,47 @@ impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
             return None;
         }
 
+        // Ctrl+wheel is handled BEFORE the `position_in(bounds)?` early-return
+        // below: when the canvas is smaller than the surrounding scrollable
+        // viewport (e.g. zoomed out on a small region), the cursor may be over
+        // empty scrollable area rather than the canvas pixels. The canvas
+        // widget itself still receives the wheel event from the scrollable, so
+        // we must intercept it without requiring `cursor` to be inside
+        // `bounds`. We also accumulate the delta to debounce high-resolution
+        // wheels and trackpads, which can fire many small events per notch.
+        if let cosmic::iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) = event
+            && state.modifiers.control()
+        {
+            let (dy, is_pixels) = match delta {
+                mouse::ScrollDelta::Lines { y, .. } => (*y, false),
+                mouse::ScrollDelta::Pixels { y, .. } => (*y, true),
+            };
+            if dy == 0.0 {
+                return None;
+            }
+            // Reset the accumulator if the input source kind changed (Lines vs
+            // Pixels) or the direction flipped — otherwise leftover delta from
+            // the previous gesture would warp the next.
+            if state.wheel_is_pixels != is_pixels
+                || state.wheel_accum.signum() != dy.signum()
+            {
+                state.wheel_accum = 0.0;
+                state.wheel_is_pixels = is_pixels;
+            }
+            state.wheel_accum += dy;
+            let step = if is_pixels { WHEEL_PIXEL_STEP } else { WHEEL_LINE_STEP };
+            if state.wheel_accum >= step {
+                state.wheel_accum -= step;
+                return Some(canvas::Action::publish(Msg::ZoomIn).and_capture());
+            } else if state.wheel_accum <= -step {
+                state.wheel_accum += step;
+                return Some(canvas::Action::publish(Msg::ZoomOut).and_capture());
+            }
+            // Below threshold: capture the event so it doesn't fall through to
+            // the scrollable's pan handling, but emit no zoom message yet.
+            return Some(canvas::Action::<Msg>::capture());
+        }
+
         let pos = cursor.position_in(bounds)?;
         // Descale widget-space cursor coords back into image-space so all
         // downstream geometry math (scene, draw_annotation) stays in image-space.
@@ -769,23 +827,6 @@ impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
             }
             cosmic::iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 Some(canvas::Action::publish(Msg::PointerUp(cp)).and_capture())
-            }
-            cosmic::iced::Event::Mouse(mouse::Event::WheelScrolled { delta })
-                if state.modifiers.control() =>
-            {
-                // and_capture() prevents the surrounding scrollable from also
-                // panning when the user means to zoom.
-                let dy = match delta {
-                    mouse::ScrollDelta::Lines { y, .. }
-                    | mouse::ScrollDelta::Pixels { y, .. } => *y,
-                };
-                if dy > 0.0 {
-                    Some(canvas::Action::publish(Msg::ZoomIn).and_capture())
-                } else if dy < 0.0 {
-                    Some(canvas::Action::publish(Msg::ZoomOut).and_capture())
-                } else {
-                    None
-                }
             }
             _ => None,
         }
