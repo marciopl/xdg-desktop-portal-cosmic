@@ -1049,6 +1049,11 @@ pub fn update_annotation(
         crate::annotation::UpdateOutcome::Cancel => {
             cosmic::task::message(crate::app::Msg::Screenshot(Msg::AnnotateCancel))
         }
+        crate::annotation::UpdateOutcome::ScrollTo(id, offset) => {
+            // Cursor-centered Ctrl+wheel zoom: reposition the canvas scrollable
+            // so the image-space point under the cursor stays put.
+            cosmic::iced::widget::scrollable::scroll_to(id, offset.into())
+        }
     }
 }
 

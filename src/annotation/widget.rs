@@ -2,10 +2,10 @@
 
 use cosmic::Element;
 use cosmic::iced::widget::Stack;
-use cosmic::iced::widget::scrollable::{Direction, Scrollbar};
+use cosmic::iced::widget::scrollable::{AbsoluteOffset, Direction, Scrollbar, Viewport};
 use cosmic::iced::{Length, Pixels, Vector};
 use cosmic::iced::widget::canvas;
-use cosmic::widget::{button, column, container, icon, row, space, text};
+use cosmic::widget::{button, column, container, icon, mouse_area, row, space, text};
 use image::RgbaImage;
 
 use crate::annotation::model::{
@@ -41,6 +41,19 @@ pub struct AnnotationView {
     /// Pending text edit: position (canvas-local), current text buffer, focus id.
     pub text_edit: Option<TextEditState>,
     pub zoom: f32,
+    /// Stable id for the canvas scrollable so `scrollable::scroll_to` can target
+    /// it after a cursor-centered zoom step.
+    pub scrollable_id: cosmic::widget::Id,
+    /// Last reported absolute scroll offset of the canvas scrollable. Updated
+    /// from `Msg::ScrollChanged`. Used together with `cursor_in_viewport` to
+    /// keep the image-space point under the cursor stationary across Ctrl+wheel
+    /// zoom steps.
+    pub scroll_offset: AbsoluteOffset,
+    /// Cursor position in viewport-local coords (i.e. relative to the
+    /// scrollable's visible rectangle, NOT the canvas), or `None` when the
+    /// cursor is outside the editor area. Updated from `Msg::CursorMovedInViewport`
+    /// / `Msg::CursorLeftViewport` produced by the wrapping `mouse_area`.
+    pub cursor_in_viewport: Option<cosmic::iced::Point>,
 }
 
 impl AnnotationView {
@@ -61,6 +74,9 @@ impl AnnotationView {
             pointer_down: None,
             text_edit: None,
             zoom: 1.0,
+            scrollable_id: cosmic::widget::Id::unique(),
+            scroll_offset: AbsoluteOffset { x: 0.0, y: 0.0 },
+            cursor_in_viewport: None,
         }
     }
 
@@ -125,6 +141,19 @@ pub enum Msg {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// Cursor moved over the scrollable viewport. Coords are viewport-local
+    /// (relative to the scrollable's visible rect).
+    CursorMovedInViewport(cosmic::iced::Point),
+    /// Cursor left the scrollable viewport.
+    CursorLeftViewport,
+    /// The scrollable's content has been scrolled (or its size changed).
+    ScrollChanged(Viewport),
+    /// Ctrl+wheel-up: zoom in while keeping the image-space point under the
+    /// cursor stationary. Emitted only by the canvas wheel handler.
+    ZoomAtCursorIn,
+    /// Ctrl+wheel-down: zoom out while keeping the image-space point under
+    /// the cursor stationary.
+    ZoomAtCursorOut,
 }
 
 pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
@@ -188,7 +217,11 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
     };
 
     // Wrap the canvas in a scrollable so users can pan when zoomed past the window.
+    // `id` + `on_scroll` let us track the scroll offset so cursor-centered Ctrl+wheel
+    // zoom can compute a new offset that keeps the image point under the cursor.
     let scrollable_canvas: Element<'_, Msg> = cosmic::widget::scrollable(canvas_element)
+        .id(state.scrollable_id.clone())
+        .on_scroll(Msg::ScrollChanged)
         .direction(Direction::Both {
             vertical: Scrollbar::default(),
             horizontal: Scrollbar::default(),
@@ -197,7 +230,17 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
         .height(Length::Fill)
         .into();
 
-    column::with_children(vec![toolbar, scrollable_canvas])
+    // The mouse_area wrapping the scrollable reports cursor coords that are
+    // local to the *viewport* (visible rect of the scrollable), which is what
+    // cursor-centered zoom needs. The canvas's own update handler only sees
+    // canvas-local coords (which include scroll), so we can't derive viewport
+    // coords cleanly there.
+    let tracked_scrollable: Element<'_, Msg> = mouse_area(scrollable_canvas)
+        .on_move(Msg::CursorMovedInViewport)
+        .on_exit(Msg::CursorLeftViewport)
+        .into();
+
+    column::with_children(vec![toolbar, tracked_scrollable])
         .into()
 }
 
@@ -413,6 +456,10 @@ pub enum UpdateOutcome {
     None,
     Done,
     Cancel,
+    /// Caller should issue `cosmic::iced::widget::scrollable::scroll_to(id, offset)`.
+    /// Used after a cursor-centered zoom step to reposition the canvas so the
+    /// image-space point under the cursor stays put.
+    ScrollTo(cosmic::widget::Id, AbsoluteOffset),
 }
 
 pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
@@ -662,7 +709,60 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
             state.zoom_reset();
             UpdateOutcome::None
         }
+        Msg::CursorMovedInViewport(p) => {
+            state.cursor_in_viewport = Some(p);
+            UpdateOutcome::None
+        }
+        Msg::CursorLeftViewport => {
+            state.cursor_in_viewport = None;
+            UpdateOutcome::None
+        }
+        Msg::ScrollChanged(viewport) => {
+            state.scroll_offset = viewport.absolute_offset();
+            UpdateOutcome::None
+        }
+        Msg::ZoomAtCursorIn => zoom_at_cursor(state, ZoomDir::In),
+        Msg::ZoomAtCursorOut => zoom_at_cursor(state, ZoomDir::Out),
     }
+}
+
+enum ZoomDir {
+    In,
+    Out,
+}
+
+/// Apply a single zoom step at the cursor. After the zoom we want the image-space
+/// point that was under the cursor at zoom `z0` to remain under it at zoom `z1`.
+///
+/// Image-space point under cursor: `img = (cursor + scroll) / z0`.
+/// New scroll required: `scroll' = img * z1 - cursor = ((cursor + scroll) / z0) * z1 - cursor`.
+/// Clamped to non-negative because the scrollable doesn't accept negative offsets.
+fn zoom_at_cursor(state: &mut AnnotationView, dir: ZoomDir) -> UpdateOutcome {
+    let z0 = state.zoom;
+    match dir {
+        ZoomDir::In => state.zoom_in(),
+        ZoomDir::Out => state.zoom_out(),
+    }
+    let z1 = state.zoom;
+    // No-op when already clamped at MIN_ZOOM/MAX_ZOOM — leave scroll alone.
+    if (z1 - z0).abs() < f32::EPSILON {
+        return UpdateOutcome::None;
+    }
+    let Some(cursor) = state.cursor_in_viewport else {
+        // No known cursor (e.g. wheel event without prior mouse_area on_move)
+        // — let the existing top-left-anchored behaviour stand.
+        return UpdateOutcome::None;
+    };
+    // Defensive: z0 is clamped >= MIN_ZOOM so this is well-defined; the floor
+    // mirrors AnnotationProgram::draw's divide-by-zero guard.
+    let z0_safe = z0.max(1e-3);
+    let sx = state.scroll_offset.x;
+    let sy = state.scroll_offset.y;
+    let new_sx = (((cursor.x + sx) / z0_safe) * z1 - cursor.x).max(0.0);
+    let new_sy = (((cursor.y + sy) / z0_safe) * z1 - cursor.y).max(0.0);
+    let new_offset = AbsoluteOffset { x: new_sx, y: new_sy };
+    state.scroll_offset = new_offset;
+    UpdateOutcome::ScrollTo(state.scrollable_id.clone(), new_offset)
 }
 
 const PALETTE: &[Color] = &[
@@ -801,10 +901,10 @@ impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
             let step = if is_pixels { WHEEL_PIXEL_STEP } else { WHEEL_LINE_STEP };
             if state.wheel_accum >= step {
                 state.wheel_accum -= step;
-                return Some(canvas::Action::publish(Msg::ZoomIn).and_capture());
+                return Some(canvas::Action::publish(Msg::ZoomAtCursorIn).and_capture());
             } else if state.wheel_accum <= -step {
                 state.wheel_accum += step;
-                return Some(canvas::Action::publish(Msg::ZoomOut).and_capture());
+                return Some(canvas::Action::publish(Msg::ZoomAtCursorOut).and_capture());
             }
             // Below threshold: capture the event so it doesn't fall through to
             // the scrollable's pan handling, but emit no zoom message yet.
