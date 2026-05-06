@@ -327,8 +327,7 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
     };
 
     let zoom_pct = (state.zoom * 100.0).round() as i32;
-    let zoom_label: Element<'_, Msg> = container(text(format!("{zoom_pct}%")).size(Pixels(12.0)))
-        .width(Length::Fixed(48.0))
+    let zoom_label: Element<'_, Msg> = container(text(format!("{zoom_pct}%")))
         .center_x(Length::Fixed(48.0))
         .into();
     let zoom_group = row::with_children(vec![
