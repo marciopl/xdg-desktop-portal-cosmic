@@ -31,3 +31,6 @@ tool-crop = Crop
 stroke-width = Stroke width
 text-size = Text size
 tile-size = Tile size
+tool-zoom-in = Zoom In
+tool-zoom-out = Zoom Out
+tool-zoom-reset = Reset Zoom

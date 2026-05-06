@@ -326,6 +326,34 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
         _ => space::horizontal().width(Length::Fixed(0.0)).into(),
     };
 
+    let zoom_pct = (state.zoom * 100.0).round() as i32;
+    let zoom_label: Element<'_, Msg> = container(text(format!("{zoom_pct}%")).size(Pixels(12.0)))
+        .width(Length::Fixed(48.0))
+        .center_x(Length::Fixed(48.0))
+        .into();
+    let zoom_group = row::with_children(vec![
+        icon_action_btn(
+            "zoom-out-symbolic",
+            fl!("tool-zoom-out"),
+            "Ctrl+-",
+            Msg::ZoomOut,
+        ),
+        zoom_label,
+        icon_action_btn(
+            "zoom-in-symbolic",
+            fl!("tool-zoom-in"),
+            "Ctrl++",
+            Msg::ZoomIn,
+        ),
+        icon_action_btn(
+            "zoom-original-symbolic",
+            fl!("tool-zoom-reset"),
+            "Ctrl+0",
+            Msg::ZoomReset,
+        ),
+    ])
+    .spacing(4);
+
     let history_and_exit = row::with_children(vec![
         icon_action_btn(
             "edit-undo-symbolic",
@@ -358,6 +386,7 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
             stroke,
             tool_specific,
             space::horizontal().width(Length::Fill).into(),
+            zoom_group.into(),
             history_and_exit.into(),
         ])
         .spacing(16)
@@ -698,21 +727,33 @@ struct AnnotationProgram<'a> {
     zoom: f32,
 }
 
+#[derive(Default)]
+struct ProgramState {
+    modifiers: cosmic::iced::keyboard::Modifiers,
+}
+
 // Parameterized over `cosmic::Theme` so the resulting `Canvas` produces a
 // `cosmic::Element` (which is `Element<'_, M, cosmic::Theme, cosmic::Renderer>`).
 // The default `Program` theme is `iced::Theme`, which would produce an iced
 // Element that doesn't satisfy `cosmic::Element`'s trait bounds.
 impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
-    type State = ();
+    type State = ProgramState;
 
     fn update(
         &self,
-        _state: &mut (),
+        state: &mut ProgramState,
         event: &cosmic::iced::Event,
         bounds: cosmic::iced::Rectangle,
         cursor: cosmic::iced::mouse::Cursor,
     ) -> Option<canvas::Action<Msg>> {
-        use cosmic::iced::mouse;
+        use cosmic::iced::{keyboard, mouse};
+
+        // Track keyboard modifiers so wheel events know whether Ctrl is held.
+        if let cosmic::iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
+            state.modifiers = *m;
+            return None;
+        }
+
         let pos = cursor.position_in(bounds)?;
         // Descale widget-space cursor coords back into image-space so all
         // downstream geometry math (scene, draw_annotation) stays in image-space.
@@ -730,13 +771,30 @@ impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
             cosmic::iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 Some(canvas::Action::publish(Msg::PointerUp(cp)).and_capture())
             }
+            cosmic::iced::Event::Mouse(mouse::Event::WheelScrolled { delta })
+                if state.modifiers.control() =>
+            {
+                // and_capture() prevents the surrounding scrollable from also
+                // panning when the user means to zoom.
+                let dy = match delta {
+                    mouse::ScrollDelta::Lines { y, .. }
+                    | mouse::ScrollDelta::Pixels { y, .. } => *y,
+                };
+                if dy > 0.0 {
+                    Some(canvas::Action::publish(Msg::ZoomIn).and_capture())
+                } else if dy < 0.0 {
+                    Some(canvas::Action::publish(Msg::ZoomOut).and_capture())
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
 
     fn draw(
         &self,
-        _state: &(),
+        _state: &ProgramState,
         renderer: &cosmic::Renderer,
         _theme: &cosmic::Theme,
         bounds: cosmic::iced::Rectangle,

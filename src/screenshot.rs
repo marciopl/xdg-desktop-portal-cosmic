@@ -608,6 +608,21 @@ pub(crate) fn view(portal: &CosmicPortal, id: window::Id) -> cosmic::Element<'_,
                                     crate::annotation::WidgetMsg::Undo,
                                 ));
                             }
+                            "=" | "+" => {
+                                return Some(Msg::AnnotationInner(
+                                    crate::annotation::WidgetMsg::ZoomIn,
+                                ));
+                            }
+                            "-" => {
+                                return Some(Msg::AnnotationInner(
+                                    crate::annotation::WidgetMsg::ZoomOut,
+                                ));
+                            }
+                            "0" => {
+                                return Some(Msg::AnnotationInner(
+                                    crate::annotation::WidgetMsg::ZoomReset,
+                                ));
+                            }
                             _ => {}
                         }
                     }
