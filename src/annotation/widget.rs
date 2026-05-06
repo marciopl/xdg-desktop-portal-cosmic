@@ -422,7 +422,8 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
             Msg::ZoomReset,
         ),
     ])
-    .spacing(4);
+    .spacing(4)
+    .align_y(cosmic::iced::alignment::Vertical::Center);
 
     let history_and_exit = row::with_children(vec![
         icon_action_btn(
@@ -460,6 +461,7 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
             history_and_exit.into(),
         ])
         .spacing(16)
+        .align_y(cosmic::iced::alignment::Vertical::Center)
         .into(),
     ])
     .spacing(8)
@@ -839,6 +841,7 @@ fn stepper<'a>(label: String, value: String, on_dec: Msg, on_inc: Msg) -> Elemen
         button::standard("+").on_press(on_inc).into(),
     ])
     .spacing(4)
+    .align_y(cosmic::iced::alignment::Vertical::Center)
     .into()
 }
 
