@@ -129,14 +129,17 @@ pub enum Msg {
 pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
     let toolbar = build_toolbar(state);
 
-    // Render the canvas at the captured image's exact pixel size so widget
-    // coordinates equal canvas-local pixels (1:1 mapping, no scaling).
-    let img_w = Length::Fixed(state.captured.width() as f32);
-    let img_h = Length::Fixed(state.captured.height() as f32);
+    // Render the canvas at captured pixel size * zoom. Widget coords map to
+    // canvas-local pixels at the zoomed scale; AnnotationProgram::update divides
+    // cursor coords by zoom to recover image-space coordinates.
+    let img_px_w = state.captured.width() as f32;
+    let img_px_h = state.captured.height() as f32;
+    let canvas_w = Length::Fixed(img_px_w * state.zoom);
+    let canvas_h = Length::Fixed(img_px_h * state.zoom);
 
     let bg_image: Element<'_, Msg> = cosmic::widget::image(state.captured_handle.clone())
-        .width(img_w)
-        .height(img_h)
+        .width(canvas_w)
+        .height(canvas_h)
         .into();
 
     let canvas_overlay: Element<'_, Msg> = cosmic::widget::canvas(AnnotationProgram {
@@ -144,20 +147,22 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
         scene: &state.scene,
         committed_cache: &state.committed_cache,
         overlay_cache: &state.overlay_cache,
+        zoom: state.zoom,
     })
-    .width(img_w)
-    .height(img_h)
+    .width(canvas_w)
+    .height(canvas_h)
     .into();
 
     let canvas_layer: Element<'_, Msg> = Stack::with_children(vec![bg_image, canvas_overlay])
-        .width(img_w)
-        .height(img_h)
+        .width(canvas_w)
+        .height(canvas_h)
         .into();
 
     // If a text edit is in progress, layer a positioned text_input over the canvas.
     let canvas_element: Element<'_, Msg> = if let Some(te) = &state.text_edit {
-        let leading_x = te.position.x.max(0.0);
-        let leading_y = te.position.y.max(0.0);
+        // Text-edit position is stored in image-space; scale into widget-space.
+        let leading_x = (te.position.x * state.zoom).max(0.0);
+        let leading_y = (te.position.y * state.zoom).max(0.0);
         let input: Element<'_, Msg> = cosmic::widget::text_input("", &te.text)
             .id(te.input_id.clone())
             .on_input(Msg::TextEditChanged)
@@ -174,14 +179,20 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
         ])
         .into();
         Stack::with_children(vec![canvas_layer, positioned])
-            .width(img_w)
-            .height(img_h)
+            .width(canvas_w)
+            .height(canvas_h)
             .into()
     } else {
         canvas_layer
     };
 
-    column::with_children(vec![toolbar, canvas_element])
+    // Wrap the canvas in a scrollable so users can pan when zoomed past the window.
+    let scrollable_canvas: Element<'_, Msg> = cosmic::widget::scrollable(canvas_element)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+
+    column::with_children(vec![toolbar, scrollable_canvas])
         .into()
 }
 
@@ -679,6 +690,7 @@ struct AnnotationProgram<'a> {
     scene: &'a AnnotationScene,
     committed_cache: &'a canvas::Cache,
     overlay_cache: &'a canvas::Cache,
+    zoom: f32,
 }
 
 // Parameterized over `cosmic::Theme` so the resulting `Canvas` produces a
@@ -697,7 +709,12 @@ impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
     ) -> Option<canvas::Action<Msg>> {
         use cosmic::iced::mouse;
         let pos = cursor.position_in(bounds)?;
-        let cp = Point { x: pos.x, y: pos.y };
+        // Descale widget-space cursor coords back into image-space so all
+        // downstream geometry math (scene, draw_annotation) stays in image-space.
+        // The zoom field is clamped >= MIN_ZOOM at the model layer; the 1e-3 floor
+        // is a defensive guard against divide-by-zero only.
+        let zoom = self.zoom.max(1e-3);
+        let cp = Point { x: pos.x / zoom, y: pos.y / zoom };
         match event {
             cosmic::iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 Some(canvas::Action::publish(Msg::PointerDown(cp)).and_capture())
@@ -720,9 +737,18 @@ impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
         bounds: cosmic::iced::Rectangle,
         _cursor: cosmic::iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        // Caches are cleared on zoom change (set_zoom), so re-tessellation runs at
+        // the new zoom. We apply a single frame-level scale so all downstream
+        // geometry math (draw_annotation, draw_crop_dim) stays in image-space.
+        let zoom = self.zoom;
+        // The crop-dim mask is an even-odd outer rect that must cover the full
+        // image-space canvas. After frame.scale(zoom), bounds (in widget pixels)
+        // becomes (bounds / zoom) in image-space coordinates.
+        let img_size = cosmic::iced::Size::new(bounds.width / zoom, bounds.height / zoom);
         let committed = self
             .committed_cache
             .draw(renderer, bounds.size(), |frame| {
+                frame.scale(zoom);
                 for ann in self.scene.iter_committed() {
                     draw_annotation(frame, self.captured, ann);
                 }
@@ -730,11 +756,12 @@ impl<'a> canvas::Program<Msg, cosmic::Theme> for AnnotationProgram<'a> {
         let overlay = self
             .overlay_cache
             .draw(renderer, bounds.size(), |frame| {
+                frame.scale(zoom);
                 if let Some(ann) = self.scene.in_progress() {
                     draw_annotation(frame, self.captured, ann);
                 }
                 if let Some(crop) = self.scene.crop() {
-                    draw_crop_dim(frame, crop, bounds.size());
+                    draw_crop_dim(frame, crop, img_size);
                 }
             });
         vec![committed, overlay]
