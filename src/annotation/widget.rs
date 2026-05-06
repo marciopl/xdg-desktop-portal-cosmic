@@ -183,10 +183,29 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
     .height(canvas_h)
     .into();
 
-    let canvas_layer: Element<'_, Msg> = Stack::with_children(vec![bg_image, canvas_overlay])
-        .width(canvas_w)
-        .height(canvas_h)
-        .into();
+    // Anchor the Stack to top-left and let it shrink to its intrinsic Fixed size.
+    // Without this `container` wrapper, when the surrounding scrollable's
+    // content area is taller (or wider) than the canvas — i.e. when zoomed out
+    // below 100% so the canvas is smaller than the viewport — the Stack's
+    // children end up rendered at a different vertical position than where
+    // `Layout::bounds()` reports the canvas widget to be. The cursor coords
+    // returned by `cursor.position_in(bounds)` are computed relative to that
+    // reported `bounds.y`, which is the top of the unscrolled scrollable
+    // content area (i.e. the toolbar's bottom). The canvas bg_image and
+    // committed/overlay geometry, however, get drawn from an origin that is
+    // shifted by any layout slack. Wrapping in an explicit Length::Shrink
+    // container with Start alignment pins the Stack to top-left so input and
+    // render coordinate frames stay aligned regardless of viewport size.
+    let canvas_layer: Element<'_, Msg> = container(
+        Stack::with_children(vec![bg_image, canvas_overlay])
+            .width(canvas_w)
+            .height(canvas_h),
+    )
+    .width(Length::Shrink)
+    .height(Length::Shrink)
+    .align_x(cosmic::iced::alignment::Horizontal::Left)
+    .align_y(cosmic::iced::alignment::Vertical::Top)
+    .into();
 
     // If a text edit is in progress, layer a positioned text_input over the canvas.
     let canvas_element: Element<'_, Msg> = if let Some(te) = &state.text_edit {
@@ -208,10 +227,19 @@ pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
             .into(),
         ])
         .into();
-        Stack::with_children(vec![canvas_layer, positioned])
-            .width(canvas_w)
-            .height(canvas_h)
-            .into()
+        // Same pinning treatment as the bg_image+canvas Stack above so the
+        // text-edit overlay tracks the canvas in image-space coordinates even
+        // when the scrollable's viewport is taller/wider than the canvas.
+        container(
+            Stack::with_children(vec![canvas_layer, positioned])
+                .width(canvas_w)
+                .height(canvas_h),
+        )
+        .width(Length::Shrink)
+        .height(Length::Shrink)
+        .align_x(cosmic::iced::alignment::Horizontal::Left)
+        .align_y(cosmic::iced::alignment::Vertical::Top)
+        .into()
     } else {
         canvas_layer
     };
