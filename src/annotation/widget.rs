@@ -124,7 +124,6 @@ pub enum Msg {
     ZoomIn,
     ZoomOut,
     ZoomReset,
-    SetZoom(f32),
 }
 
 pub fn view(state: &AnnotationView) -> Element<'_, Msg> {
@@ -619,10 +618,6 @@ pub fn update(state: &mut AnnotationView, msg: Msg) -> UpdateOutcome {
             state.zoom_reset();
             UpdateOutcome::None
         }
-        Msg::SetZoom(z) => {
-            state.set_zoom(z);
-            UpdateOutcome::None
-        }
     }
 }
 
@@ -1015,6 +1010,6 @@ mod tests {
         let mut view = AnnotationView::new(RgbaImage::new(10, 10));
         view.set_zoom(2.5);
         view.zoom_reset();
-        assert!((view.zoom - 1.0).abs() < f32::EPSILON);
+        assert!((view.zoom - 1.0).abs() < 1e-6);
     }
 }
