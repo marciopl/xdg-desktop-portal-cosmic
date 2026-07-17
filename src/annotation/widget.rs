@@ -471,11 +471,11 @@ fn build_toolbar<'a>(state: &'a AnnotationView) -> Element<'a, Msg> {
     container(inner)
         .class(cosmic::theme::Container::Custom(Box::new(|theme| {
             let palette = theme.cosmic();
-            let mut bg: cosmic::iced::Color = palette.background.component.base.into();
+            let mut bg: cosmic::iced::Color = palette.background(false).component.base.into();
             bg.a = 0.85;
             cosmic::iced::widget::container::Style {
                 background: Some(cosmic::iced::Background::Color(bg)),
-                text_color: Some(palette.background.component.on.into()),
+                text_color: Some(palette.background(false).component.on.into()),
                 ..Default::default()
             }
         })))

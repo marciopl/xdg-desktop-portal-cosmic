@@ -4,9 +4,7 @@ use cosmic::cosmic_config::CosmicConfigEntry;
 use cosmic::iced::clipboard::mime::AsMimeTypes;
 use cosmic::iced::keyboard::Key;
 use cosmic::iced::keyboard::key::Named;
-use cosmic::iced::platform_specific::shell::commands::layer_surface::{
-    destroy_layer_surface, get_layer_surface,
-};
+use cosmic::iced::platform_specific::shell::commands::layer_surface::destroy_layer_surface;
 use cosmic::iced::runtime::clipboard;
 use cosmic::iced::runtime::platform_specific::wayland::layer_surface::{
     IcedOutput, SctkLayerSurfaceSettings,
@@ -741,10 +739,13 @@ pub(crate) fn view(portal: &CosmicPortal, id: window::Id) -> cosmic::Element<'_,
     .into()
 }
 
-pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::app::Msg> {
+pub fn update_msg(
+    portal: &mut CosmicPortal,
+    msg: Msg,
+) -> cosmic::Task<cosmic::Action<crate::app::Msg>> {
     match msg {
         Msg::Capture => {
-            let cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
+            let cmds: Vec<cosmic::Task<cosmic::Action<crate::app::Msg>>> = portal
                 .outputs
                 .iter()
                 .map(|o| destroy_layer_surface(o.id))
@@ -935,7 +936,7 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
         Msg::AnnotateStart(captured) => {
             // Tear down the selection layer surfaces — the annotation view replaces them
             // visually. We re-create a fresh layer surface for annotation below.
-            let mut cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
+            let mut cmds: Vec<cosmic::Task<cosmic::Action<crate::app::Msg>>> = portal
                 .outputs
                 .iter()
                 .map(|o| destroy_layer_surface(o.id))
@@ -950,19 +951,27 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
             portal.annotation_view = Some(crate::annotation::AnnotationView::new(captured));
             let primary = portal.outputs.first().cloned();
             if let Some(o) = primary {
-                cmds.push(get_layer_surface(SctkLayerSurfaceSettings {
-                    id: o.id,
-                    layer: Layer::Overlay,
-                    keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                    input_zone: None,
-                    anchor: Anchor::empty(),
-                    output: IcedOutput::Output(o.output.clone()),
-                    namespace: "screenshot-annotate".to_string(),
-                    size: Some((Some(surface_w), Some(surface_h))),
-                    exclusive_zone: -1,
-                    size_limits: Limits::NONE.min_height(1.0).min_width(1.0),
-                    ..Default::default()
-                }));
+                let id = o.id;
+                let output = o.output.clone();
+                cmds.push(cosmic::surface::surface_task::<crate::app::Msg>(
+                    cosmic::surface::action::simple_layer_shell::<crate::app::Msg>(
+                        Default::default,
+                        move || SctkLayerSurfaceSettings {
+                            id,
+                            layer: Layer::Overlay,
+                            keyboard_interactivity: KeyboardInteractivity::Exclusive,
+                            input_zone: None,
+                            anchor: Anchor::empty(),
+                            output: IcedOutput::Output(output.clone()),
+                            namespace: "screenshot-annotate".to_string(),
+                            size: Some((Some(surface_w), Some(surface_h))),
+                            exclusive_zone: -1,
+                            size_limits: Limits::NONE.min_height(1.0).min_width(1.0),
+                            ..Default::default()
+                        },
+                        None::<fn() -> cosmic::Element<'static, cosmic::Action<crate::app::Msg>>>,
+                    ),
+                ));
             }
             cosmic::Task::batch(cmds)
         }
@@ -973,7 +982,7 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
             let Some(args) = portal.screenshot_args.take() else {
                 return cosmic::Task::none();
             };
-            let mut cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
+            let mut cmds: Vec<cosmic::Task<cosmic::Action<crate::app::Msg>>> = portal
                 .outputs
                 .iter()
                 .map(|o| destroy_layer_surface(o.id))
@@ -1018,7 +1027,7 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
         }
         Msg::AnnotateCancel => {
             portal.annotation_view = None;
-            let cmds: Vec<cosmic::Task<crate::app::Msg>> = portal
+            let cmds: Vec<cosmic::Task<cosmic::Action<crate::app::Msg>>> = portal
                 .outputs
                 .iter()
                 .map(|o| destroy_layer_surface(o.id))
@@ -1039,7 +1048,7 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
 pub fn update_annotation(
     portal: &mut CosmicPortal,
     msg: crate::annotation::WidgetMsg,
-) -> cosmic::Task<crate::app::Msg> {
+) -> cosmic::Task<cosmic::Action<crate::app::Msg>> {
     let Some(view) = portal.annotation_view.as_mut() else {
         return cosmic::Task::none();
     };
@@ -1059,7 +1068,10 @@ pub fn update_annotation(
     }
 }
 
-pub fn update_args(portal: &mut CosmicPortal, args: Args) -> cosmic::Task<crate::app::Msg> {
+pub fn update_args(
+    portal: &mut CosmicPortal,
+    args: Args,
+) -> cosmic::Task<cosmic::Action<crate::app::Msg>> {
     let Args {
         handle,
         app_id,
@@ -1127,19 +1139,30 @@ pub fn update_args(portal: &mut CosmicPortal, args: Args) -> cosmic::Task<crate:
                 |OutputState {
                      output, id, name, ..
                  }| {
-                    get_layer_surface(SctkLayerSurfaceSettings {
-                        id: *id,
-                        layer: Layer::Overlay,
-                        keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                        input_zone: None,
-                        anchor: Anchor::all(),
-                        output: IcedOutput::Output(output.clone()),
-                        namespace: "screenshot".to_string(),
-                        size: Some((None, None)),
-                        exclusive_zone: -1,
-                        size_limits: Limits::NONE.min_height(1.0).min_width(1.0),
-                        ..Default::default()
-                    })
+                    let id = *id;
+                    let output = output.clone();
+                    let name = name.clone();
+                    cosmic::surface::surface_task::<crate::app::Msg>(
+                cosmic::surface::action::simple_layer_shell::<crate::app::Msg>(
+                    Default::default,
+                        move || {
+                            SctkLayerSurfaceSettings {
+                                    id,
+                                    layer: Layer::Overlay,
+                                    keyboard_interactivity: KeyboardInteractivity::Exclusive,
+                                    input_zone: None,
+                                    anchor: Anchor::all(),
+                                    output: IcedOutput::Output(output.clone()),
+                                    namespace: "screenshot".to_string(),
+                                    size: Some((None, None)),
+                                    exclusive_zone: -1,
+                                    size_limits: Limits::NONE.min_height(1.0).min_width(1.0),
+                                    ..Default::default()
+                                }
+                            },
+                        None::<fn() -> cosmic::Element<'static, cosmic::Action<crate::app::Msg>>>,
+                        ),
+                    )
                 },
             )
             .collect();

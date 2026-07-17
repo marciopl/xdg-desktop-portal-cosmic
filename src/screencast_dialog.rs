@@ -10,17 +10,17 @@ use cosmic::iced::keyboard::key::Named;
 use cosmic::iced::{self, window};
 use fde::IconSource;
 
+use cosmic::desktop::fde;
 use cosmic::iced::platform_specific::shell::commands::layer_surface::{
-    KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface,
+    KeyboardInteractivity, Layer, destroy_layer_surface,
 };
 use cosmic::iced::runtime::platform_specific::wayland::layer_surface::SctkLayerSurfaceSettings;
 use cosmic::widget::autosize;
 use cosmic::{theme, widget};
 use cosmic_client_toolkit::sctk::output::OutputInfo;
 use cosmic_client_toolkit::toplevel_info::ToplevelInfo;
-use freedesktop_desktop_entry as fde;
-use freedesktop_desktop_entry::unicase::Ascii;
-use freedesktop_desktop_entry::{DesktopEntry, get_languages_from_env};
+use fde::unicase::Ascii;
+use fde::{DesktopEntry, get_languages_from_env};
 use std::mem;
 use std::sync::LazyLock;
 use tokio::sync::mpsc;
@@ -120,15 +120,21 @@ fn get_desktop_entry<'a>(entries: &'a [DesktopEntry], id: &str) -> Option<&'a De
     fde::find_app_by_id(entries, Ascii::new(id))
 }
 
-fn create_dialog() -> cosmic::Task<crate::app::Msg> {
-    get_layer_surface(SctkLayerSurfaceSettings {
-        id: *SCREENCAST_ID,
-        keyboard_interactivity: KeyboardInteractivity::Exclusive,
-        namespace: "screencast".into(),
-        layer: Layer::Overlay,
-        size: None,
-        ..Default::default()
-    })
+fn create_dialog() -> cosmic::Task<cosmic::Action<crate::app::Msg>> {
+    cosmic::surface::surface_task::<crate::app::Msg>(cosmic::surface::action::simple_layer_shell::<
+        crate::app::Msg,
+    >(
+        Default::default,
+        move || SctkLayerSurfaceSettings {
+            id: *SCREENCAST_ID,
+            keyboard_interactivity: KeyboardInteractivity::Exclusive,
+            namespace: "screencast".into(),
+            layer: Layer::Overlay,
+            size: None,
+            ..Default::default()
+        },
+        None::<fn() -> cosmic::Element<'static, cosmic::Action<crate::app::Msg>>>,
+    ))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -191,7 +197,10 @@ fn active_tab(portal: &CosmicPortal) -> Tab {
     *portal.screencast_tab_model.active_data::<Tab>().unwrap()
 }
 
-pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::app::Msg> {
+pub fn update_msg(
+    portal: &mut CosmicPortal,
+    msg: Msg,
+) -> cosmic::Task<cosmic::Action<crate::app::Msg>> {
     let Some(args) = portal.screencast_args.as_mut() else {
         return cosmic::Task::none();
     };
@@ -247,7 +256,10 @@ pub fn update_msg(portal: &mut CosmicPortal, msg: Msg) -> cosmic::Task<crate::ap
     cosmic::Task::none()
 }
 
-pub fn update_args(portal: &mut CosmicPortal, args: Args) -> cosmic::Task<crate::app::Msg> {
+pub fn update_args(
+    portal: &mut CosmicPortal,
+    args: Args,
+) -> cosmic::Task<cosmic::Action<crate::app::Msg>> {
     // If the dialog is already open, cancel previous request, but re-use dialog surface
     let command = if let Some(args) = portal.screencast_args.take() {
         args.send_response(None);
@@ -281,7 +293,7 @@ pub fn update_args(portal: &mut CosmicPortal, args: Args) -> cosmic::Task<crate:
 pub fn cancel(
     portal: &mut CosmicPortal,
     session_handle: zvariant::ObjectPath<'static>,
-) -> cosmic::Task<crate::app::Msg> {
+) -> cosmic::Task<cosmic::Action<crate::app::Msg>> {
     if portal
         .screencast_args
         .as_ref()
