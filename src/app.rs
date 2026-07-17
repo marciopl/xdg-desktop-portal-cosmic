@@ -109,6 +109,14 @@ impl cosmic::Application for CosmicPortal {
         }: Self::Flags,
     ) -> (Self, cosmic::iced::Task<cosmic::Action<Self::Message>>) {
         core.set_app_type(cosmic::core::AppType::System);
+        // Don't let libcosmic auto-apply a theme corner radius to our layer-shell
+        // surfaces (Auto::System). These are full-screen overlays plus a 6x6 dummy;
+        // a rounded-corner `set_radius` request larger than half a surface's smaller
+        // dimension makes cosmic-comp raise the fatal `cosmic_corner_radius_layer_v1`
+        // `radius_too_large` protocol error, which tears down the Wayland connection
+        // and panics the portal. Keep rounding for regular windows/popups (the
+        // file-chooser dialogs).
+        core.set_auto_corner_radius(cosmic::core::Auto::Window | cosmic::core::Auto::Popup);
         let wayland_conn = wayland_client::Connection::connect_to_env().unwrap();
         let wayland_helper = crate::wayland::WaylandHelper::new(wayland_conn);
         let dummy_id = window::Id::unique();
