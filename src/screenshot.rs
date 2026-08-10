@@ -760,11 +760,8 @@ pub fn update_msg(
                 choice,
                 output_images: mut images,
                 toplevel_images,
-                location,
                 ..
             } = args;
-
-            let _ = Screenshot::get_img_path(location);
 
             match choice {
                 Choice::Output(name) => {
@@ -1093,6 +1090,17 @@ pub fn update_args(
         );
         tracing::warn!("Screenshot outputs: {:?}", portal.outputs);
         tracing::warn!("Screenshot images: {:?}", images.keys().collect::<Vec<_>>());
+        // Respond explicitly. Falling through to the return would drop `args`,
+        // and with it `tx`, which the D-Bus side turns into
+        // PortalResponse::Cancelled - indistinguishable from the user pressing
+        // Escape, so the request appears to silently do nothing. Send Other so
+        // this surfaces as a real error instead of a phantom cancellation.
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = tx.send(PortalResponse::Other).await {
+                tracing::error!("Failed to send screenshot mismatch response: {err}");
+            }
+        });
         return cosmic::Task::none();
     }
 
