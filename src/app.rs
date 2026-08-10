@@ -8,7 +8,7 @@ use cosmic::iced::{Event, Length, Limits, Subscription, event, window};
 use cosmic::{Task, app, cosmic_config, widget};
 use cosmic_client_toolkit::sctk::shell::wlr_layer;
 use std::collections::HashMap;
-use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::{Connection, Proxy, protocol::wl_output::WlOutput};
 
 pub(crate) fn run() -> cosmic::iced::Result {
     let settings = cosmic::app::Settings::default()
@@ -41,7 +41,7 @@ pub struct CosmicPortal {
         widget::segmented_button::Model<widget::segmented_button::SingleSelect>,
     pub location_options: Vec<String>,
     pub prev_rectangle: Option<screenshot::Rect>,
-    pub wayland_helper: crate::wayland::WaylandHelper,
+    pub wayland_helper: Option<crate::wayland::WaylandHelper>,
 
     pub outputs: Vec<OutputState>,
     pub active_output: Option<WlOutput>,
@@ -117,8 +117,6 @@ impl cosmic::Application for CosmicPortal {
         // and panics the portal. Keep rounding for regular windows/popups (the
         // file-chooser dialogs).
         core.set_auto_corner_radius(cosmic::core::Auto::Window | cosmic::core::Auto::Popup);
-        let wayland_conn = wayland_client::Connection::connect_to_env().unwrap();
-        let wayland_helper = crate::wayland::WaylandHelper::new(wayland_conn);
         let dummy_id = window::Id::unique();
         (
             Self {
@@ -135,7 +133,7 @@ impl cosmic::Application for CosmicPortal {
                 prev_rectangle: Default::default(),
                 outputs: Default::default(),
                 active_output: Default::default(),
-                wayland_helper,
+                wayland_helper: None,
                 tx: None,
                 dummy_id,
             },
@@ -197,7 +195,7 @@ impl cosmic::Application for CosmicPortal {
                     Task::none()
                 }
                 subscription::Event::NameLost => {
-                    log::warn!("'{}' name on bus lost. Exiting.", crate::DBUS_NAME);
+                    tracing::warn!("'{}' name on bus lost. Exiting.", crate::DBUS_NAME);
                     cosmic::iced::exit()
                 }
             },
@@ -205,6 +203,13 @@ impl cosmic::Application for CosmicPortal {
             Msg::Screencast(m) => screencast_dialog::update_msg(self, m),
             Msg::Annotation(m) => crate::screenshot::update_annotation(self, m),
             Msg::Output(o_event, wl_output) => {
+                if self.wayland_helper.is_none()
+                    && let Some(backend) = wl_output.backend().upgrade()
+                {
+                    let conn = Connection::from_backend(backend);
+                    self.wayland_helper = Some(crate::wayland::WaylandHelper::new(conn));
+                }
+
                 match o_event {
                     OutputEvent::Created(Some(info))
                         if info.name.is_some()
@@ -239,7 +244,7 @@ impl cosmic::Application for CosmicPortal {
                                 .unwrap();
                             state.logical_pos = info.logical_position.unwrap();
                         } else {
-                            log::warn!("Updated output {:?} not found", wl_output);
+                            tracing::warn!("Updated output {:?} not found", wl_output);
                             self.outputs.push(OutputState {
                                 output: wl_output,
                                 id: window::Id::unique(),
@@ -255,7 +260,7 @@ impl cosmic::Application for CosmicPortal {
                         }
                     }
                     e => {
-                        log::warn!("Unhandled output event: {:?} {e:?}", wl_output);
+                        tracing::warn!("Unhandled output event: {:?} {e:?}", wl_output);
                     }
                 };
 
@@ -280,10 +285,10 @@ impl cosmic::Application for CosmicPortal {
                 match &mut self.config_handler {
                     Some(handler) => {
                         if let Err(e) = self.config.set_screenshot(handler, screenshot) {
-                            log::error!("Failed to save screenshot config: {e}")
+                            tracing::error!("Failed to save screenshot config: {e}")
                         }
                     }
-                    None => log::error!("Failed to save config: No config handler"),
+                    None => tracing::error!("Failed to save config: No config handler"),
                 }
 
                 cosmic::iced::Task::none()
@@ -297,18 +302,18 @@ impl cosmic::Application for CosmicPortal {
 
     #[allow(clippy::collapsible_match)]
     fn subscription(&self) -> Subscription<Self::Message> {
-        let mut subscriptions = vec![
-            subscription::portal_subscription(self.wayland_helper.clone()).map(Msg::Portal),
-            event::listen_with(|e, _, _| match e {
-                Event::PlatformSpecific(event::PlatformSpecific::Wayland(w_e)) => match w_e {
-                    event::wayland::Event::Output(o_event, wl_output) => {
-                        Some(Msg::Output(o_event, wl_output))
-                    }
-                    _ => None,
-                },
+        let mut subscriptions = vec![event::listen_with(|e, _, _| match e {
+            Event::PlatformSpecific(event::PlatformSpecific::Wayland(w_e)) => match w_e {
+                event::wayland::Event::Output(o_event, wl_output) => {
+                    Some(Msg::Output(o_event, wl_output))
+                }
                 _ => None,
-            }),
-        ];
+            },
+            _ => None,
+        })];
+        if let Some(wayland_helper) = self.wayland_helper.clone() {
+            subscriptions.push(subscription::portal_subscription(wayland_helper).map(Msg::Portal));
+        }
         for (id, (_args, dialog)) in self.file_choosers.iter() {
             let id = *id;
             subscriptions.push(
